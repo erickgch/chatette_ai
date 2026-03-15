@@ -1,0 +1,17 @@
+# Virtual environment
+.venv/
+
+# Sensitive files
+.env
+token.pickle
+credentials.json
+
+# ChromaDB data
+data/chroma_db/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# PyCharm
+.idea/
