@@ -7,19 +7,19 @@ import soundfile as sf
 from faster_whisper import WhisperModel
 from dotenv import load_dotenv
 
-#=== LISTENING PARAMETERS
+# === LISTENING PARAMETERS ===
 SAMPLE_RATE = 16000
 CHUNK_SIZE = 512
 SILENCE_THRESHOLD = 30  # chunks of silence before stopping (~3 seconds)
 MIN_SPEECH_CHUNKS = 2   # minimum chunks to consider as speech
-#=== === ===
+# === === ===
 
 load_dotenv()
 
-PIPER_PATH = os.getenv("PIPER_PATH", "./piper/piper.exe")
-PIPER_VOICE = os.getenv("PIPER_VOICE", "./piper/en_US-lessac-medium.onnx")
+PIPER_PATH = os.getenv("PIPER_PATH")
+PIPER_VOICE = os.getenv("PIPER_VOICE")
 
-# Load Whisper model (runs on GPU if available)
+# Load Whisper model
 print("🎙️ Loading Whisper model...")
 whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
 print("✅ Whisper ready!")
@@ -28,7 +28,7 @@ print("✅ Whisper ready!")
 # ===== Speech to Text =====
 def listen() -> str:
     """Record audio until the user stops speaking, then transcribe."""
-    from silero_vad import load_silero_vad, get_speech_timestamps
+    from silero_vad import load_silero_vad
     import torch
 
     vad_model = load_silero_vad()
@@ -71,11 +71,10 @@ def listen() -> str:
     full_audio = np.concatenate(audio_chunks)
 
     # Save to temp file and transcribe
-    import tempfile
-    import soundfile as sf
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         sf.write(tmp.name, full_audio, SAMPLE_RATE)
-        segments, _ = whisper_model.transcribe(tmp.name, language="en")
+        # No language parameter — Whisper auto-detects
+        segments, _ = whisper_model.transcribe(tmp.name)
         transcript = " ".join([seg.text for seg in segments]).strip()
 
     os.unlink(tmp.name)

@@ -14,7 +14,7 @@ load_dotenv()
 # Google API scopes
 # ========================
 SCOPES = [
-    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/calendar",  # read + write (replaces readonly)
     "https://www.googleapis.com/auth/gmail.readonly"
 ]
 
@@ -55,6 +55,7 @@ def get_google_credentials():
 # ========================
 # Calendar
 # ========================
+#CHECK EVENTS
 def get_upcoming_events(days_ahead: int = None, days_behind: int = None) -> list:
     """Fetch calendar events within a time window."""
 
@@ -72,7 +73,7 @@ def get_upcoming_events(days_ahead: int = None, days_behind: int = None) -> list
     time_min = (now - datetime.timedelta(days=days_behind)).isoformat()
     time_max = (now + datetime.timedelta(days=days_ahead)).isoformat()
 
-    print(f"📅 Fetching calendar events ({days_behind} days back, {days_ahead} ahead)...")
+    #print(f"📅 Fetching calendar events ({days_behind} days back, {days_ahead} ahead)...")
 
     events_result = service.events().list(
         calendarId="primary",
@@ -99,10 +100,52 @@ def get_upcoming_events(days_ahead: int = None, days_behind: int = None) -> list
             "location": event.get("location", "")
         })
 
-    print(f"✅ Found {len(formatted_events)} events")
+    #print(f"✅ Found {len(formatted_events)} events")
 
     return formatted_events
 
+#CREATE EVENT
+def create_calendar_event(title: str, start_datetime: str, end_datetime: str = None,
+                          description: str = "", attendees: list = None) -> str:
+    """Create a new event in Google Calendar."""
+    creds = get_google_credentials()
+    service = build("calendar", "v3", credentials=creds)
+
+    if not end_datetime:
+        from datetime import datetime, timedelta
+        start_dt = datetime.fromisoformat(start_datetime)
+        end_dt = start_dt + timedelta(hours=1)
+        end_datetime = end_dt.isoformat()
+
+    # Add Chatette signature to description
+    signature = "\n\n---\nEvent created by AI Assistant Chatette"
+    full_description = description + signature if description else signature.strip()
+
+    event = {
+        "summary": title,
+        "description": full_description,
+        "start": {
+            "dateTime": start_datetime,
+            "timeZone": "Europe/Berlin"
+        },
+        "end": {
+            "dateTime": end_datetime,
+            "timeZone": "Europe/Berlin"
+        }
+    }
+
+    if attendees:
+        event["attendees"] = [{"email": email} for email in attendees]
+        event["guestsCanSeeOtherGuests"] = True
+
+    created_event = service.events().insert(
+        calendarId="primary",
+        body=event,
+        sendUpdates="all"
+    ).execute()
+
+    print(f"✅ Event created: {created_event.get('htmlLink')}")
+    return created_event.get("id")
 
 # ========================
 # Gmail
@@ -123,7 +166,7 @@ def get_recent_emails(max_results: int = 10, days_window: int = None) -> list:
 
     after_timestamp = int(after_date.timestamp())
 
-    print(f"📧 Fetching last {max_results} emails (last {EMAIL_DAYS_WINDOW} days)...")
+    #print(f"📧 Fetching last {max_results} emails (last {EMAIL_DAYS_WINDOW} days)...")
 
     results = service.users().messages().list(
         userId="me",
@@ -187,7 +230,7 @@ def get_recent_emails(max_results: int = 10, days_window: int = None) -> list:
             "body": body
         })
 
-    print(f"✅ Found {len(formatted_emails)} emails")
+    #print(f"✅ Found {len(formatted_emails)} emails")
 
     return formatted_emails
 

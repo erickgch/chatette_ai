@@ -3,9 +3,10 @@ from dotenv import load_dotenv
 from langchain_ollama import OllamaEmbeddings, OllamaLLM
 from langchain_chroma import Chroma
 from langchain_core.prompts import PromptTemplate
-from ingestion import ingest_notes
+from ingestion import ingest_notes, ingest_calendar_events
 from note_manager import save_reminder, delete_reminder_by_line, get_all_reminders
 from datetime import datetime, timedelta
+from google_integration import create_calendar_event
 
 load_dotenv()
 
@@ -14,11 +15,12 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL")
 CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH")
 USER_NAME = os.getenv("USER_NAME")
 USER_PROFILE = os.getenv("USER_PROFILE")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
 
 # Initialize embeddings
 embeddings = OllamaEmbeddings(
     base_url=OLLAMA_BASE_URL,
-    model="nomic-embed-text"
+    model=EMBEDDING_MODEL
 )
 
 # Connect to existing ChromaDB
@@ -41,13 +43,12 @@ You are talking to {user_name}. About {user_name}: {user_profile}
 
 STRICT RULES:
 - Only answer what was specifically asked. Nothing more.
-- If the user asks about tomorrow, only mention tomorrow. Do not mention other days.
 - If the user asks about appointments, only mention appointments. Do not mention shopping or other topics.
 - Never volunteer extra information that wasn't asked for.
 - Keep answers to 1-3 sentences maximum.
 - Never calculate days of the week from memory — always derive them from the current date provided in the context.
+- Always respond in the same language {user_name} used in their question.
 
-If you find relevant information in the context, use it naturally in your response.
 If you don't find the answer in the context, say so briefly.
 
 Example:
@@ -60,6 +61,13 @@ Context: User enjoys technology and building AI assistants.
 {user_name}: Can you recommend a podcast?
 Chatette: Since you're into tech and AI, you might enjoy Lex Fridman's podcast or the TWIML AI Podcast!
 
+Example:
+Context: Today is Sunday, March 15, 2026. Tomorrow is Monday, March 16, 2026.
+Calendar event: Dentist on Wednesday, March 18 at 10am.
+Calendar event: Gym on Saturday, March 21 at 9am.
+{user_name}: Do I have anything next Saturday?
+Chatette: Yes! You've got gym on Saturday, March 21st at 9am. Have a good workout!
+
 Context:
 {context}
 
@@ -68,16 +76,17 @@ Question: {question}
 Answer:""",
     input_variables=["context", "question", "user_name", "user_profile"]
 )
-
-# ===== Pending state =====
+conversation_context = {"last_question": None, "last_answer": None}
+# ===== Pending state =======
 pending_reminder = {
     "text": None,
     "action": None,
     "conflict": None,
-    "line_to_delete": None
+    "line_to_delete": None,
+    "event_data": None
 }
 
-# ===== Triggers =====
+# ===== Triggers ==============
 REMINDER_TRIGGERS = [
     "remind me",
     "remember that",
@@ -101,13 +110,27 @@ DELETE_TRIGGERS = [
 ]
 
 CHATETTE_TRIGGERS = [
-    "are you", "what are you", "who are you",
-    "what's your name", "what is your name",
-    "can you", "do you"
+    "what are you", "who are you",
+    "what's your name", "what is your name", "tell me about you"
 ]
 
-def is_about_chatette(question: str) -> bool:
-    return any(trigger in question.lower() for trigger in CHATETTE_TRIGGERS)
+CALENDAR_TRIGGERS = [
+    "add to my calendar",
+    "schedule a",
+    "create an event",
+    "put it in my calendar",
+    "put that in my calendar",
+    "save that in the calendar",
+    "add an appointment",
+    "put in my calendar",
+    "book a",
+    "schedule an appointment"
+]
+#===================================
+#REQUEST TYPES
+
+def is_calendar_request(question: str) -> bool:
+    return any(trigger in question.lower() for trigger in CALENDAR_TRIGGERS)
 
 def is_about_chatette(question: str) -> bool:
     return any(trigger in question.lower() for trigger in CHATETTE_TRIGGERS)
@@ -115,10 +138,8 @@ def is_about_chatette(question: str) -> bool:
 def is_reminder_request(question: str) -> bool:
     return any(trigger in question.lower() for trigger in REMINDER_TRIGGERS)
 
-
 def is_delete_request(question: str) -> bool:
     return any(trigger in question.lower() for trigger in DELETE_TRIGGERS)
-
 
 # ===== Reminder Creation =====
 def handle_reminder(question: str) -> str:
@@ -192,7 +213,7 @@ Reply with one of:
     })
     return f"Just to confirm - should I save this: '{reminder_text}'?"
 
-
+# === HANDLERS ================
 # ===== Reminder Deletion =====
 def handle_delete(question: str) -> str:
     """Use LLM to find matching reminder and ask confirmation."""
@@ -235,11 +256,12 @@ Your answer:"""
 
 # ===== Confirmation Handler =====
 def handle_confirmation(question: str) -> str:
-    """Handle yes/no confirmation for pending save or delete."""
+    """Handle yes/no confirmation for pending save, delete or calendar event."""
     action = pending_reminder["action"]
     reminder_text = pending_reminder["text"]
     line_to_delete = pending_reminder["line_to_delete"]
     conflict = pending_reminder["conflict"]
+    event_data = pending_reminder["event_data"]
 
     is_yes = any(word in question.lower() for word in
                  ["yes", "correct", "right", "yep", "yeah", "sure", "ok", "okay"])
@@ -253,19 +275,41 @@ def handle_confirmation(question: str) -> str:
             save_reminder(reminder_text)
             ingest_notes()
             pending_reminder.update({"text": None, "action": None,
-                                     "conflict": None, "line_to_delete": None})
+                                     "conflict": None, "line_to_delete": None,
+                                     "event_data": None})
             return f"Got it! I've saved: '{reminder_text}'"
 
         elif action == "delete":
             result = delete_reminder_by_line(line_to_delete)
             ingest_notes()
             pending_reminder.update({"text": None, "action": None,
-                                     "conflict": None, "line_to_delete": None})
+                                     "conflict": None, "line_to_delete": None,
+                                     "event_data": None})
+            return result
+
+        elif action == "calendar":
+            if event_data is None:
+                return "Something went wrong — I lost the event details. Could you try again?"
+            create_calendar_event(
+                title=event_data["title"],
+                start_datetime=event_data["start"],
+                end_datetime=event_data.get("end"),
+                description=event_data.get("description", ""),
+                attendees=event_data.get("attendees", [])
+            )
+            ingest_calendar_events()
+            pending_reminder.update({"text": None, "action": None,
+                                     "conflict": None, "line_to_delete": None,
+                                     "event_data": None})
+            result = f"Done! I've added '{event_data['title']}' to your Google Calendar!"
+            if event_data.get("attendees"):
+                result += f" Invitations sent to: {', '.join(event_data['attendees'])}"
             return result
 
     elif is_no:
         pending_reminder.update({"text": None, "action": None,
-                                 "conflict": None, "line_to_delete": None})
+                                 "conflict": None, "line_to_delete": None,
+                                 "event_data": None})
         return "No problem, I've discarded it!"
 
     else:
@@ -273,10 +317,72 @@ def handle_confirmation(question: str) -> str:
             return f"Should I save '{reminder_text}'? Just say yes or no."
         elif action == "delete":
             return f"Should I delete '{line_to_delete}'? Just say yes or no."
+        elif action == "calendar":
+            return f"Should I add '{event_data['title']}' to your calendar? Just say yes or no."
 
+def handle_calendar_event(question: str) -> str:
+    """Extract event details and create Google Calendar event."""
+    current_date = datetime.now().strftime("%A, %B %d, %Y")
+
+    previous_context = ""
+    if conversation_context["last_answer"]:
+        previous_context = (
+            f"Previous exchange:\n"
+            f"User: {conversation_context['last_question']}\n"
+            f"Chatette: {conversation_context['last_answer']}\n\n"
+        )
+
+    import json
+    extraction_prompt = f"""Today is {current_date}.
+{previous_context}The user said: "{question}"
+
+Extract the calendar event details and return ONLY a JSON object with these fields:
+- title: event name
+- start: ISO 8601 datetime (e.g. 2026-03-20T10:00:00)
+- end: ISO 8601 datetime (leave null if not specified)
+- description: any extra details (leave empty if none)
+- attendees: list of email addresses to invite (empty list if none mentioned)
+
+Convert relative dates to actual dates.
+Return ONLY the JSON, nothing else.
+
+Examples:
+User: "add dentist appointment next Monday at 10am"
+Output: {{"title": "Dentist", "start": "2026-03-23T10:00:00", "end": null, "description": "", "attendees": []}}
+
+User: "add Leonie Umzug at 10 next Saturday, invite i.kas@web.de"
+Output: {{"title": "Leonie Umzug", "start": "2026-03-21T10:00:00", "end": null, "description": "", "attendees": ["i.kas@web.de"]}}
+
+User: "schedule lunch with John next Friday at 1pm, invite john@email.com and sara@email.com"
+Output: {{"title": "Lunch with John", "start": "2026-03-20T13:00:00", "end": null, "description": "", "attendees": ["john@email.com", "sara@email.com"]}}
+"""
+    response = llm.invoke(extraction_prompt).strip()
+    response = response[response.find("{"):response.rfind("}")+1]
+
+    try:
+        event_data = json.loads(response)
+    except json.JSONDecodeError:
+        return "I had trouble understanding the event details. Could you be more specific?"
+
+    print(f"📅 Extracted event: {event_data}")
+
+    pending_reminder.update({
+        "text": f"{event_data['title']} on {event_data['start']}",
+        "action": "calendar",
+        "conflict": None,
+        "line_to_delete": None,
+        "event_data": event_data
+    })
+
+    # Build confirmation message
+    confirmation = f"Should I add '{event_data['title']}' to your Google Calendar on {event_data['start']}?"
+    if event_data.get("attendees"):
+        confirmation += f" I'll also invite: {', '.join(event_data['attendees'])}"
+
+    return confirmation
 
 # ===== Main ask function =====
-RELEVANCE_THRESHOLD = 0.9
+RELEVANCE_THRESHOLD = 0.93 # requests/questions above the threshold will be answered using general knowledge.
 
 def ask(question: str) -> str:
     print(f"\nYou: {question}")
@@ -285,18 +391,24 @@ def ask(question: str) -> str:
     if pending_reminder["action"] is not None:
         answer = handle_confirmation(question)
         print(f"Chatette: {answer}")
+        conversation_context["last_question"] = question
+        conversation_context["last_answer"] = answer
         return answer
 
     # Check for delete request
     if is_delete_request(question):
         answer = handle_delete(question)
         print(f"Chatette: {answer}")
+        conversation_context["last_question"] = question
+        conversation_context["last_answer"] = answer
         return answer
 
     # Check for save reminder
     if is_reminder_request(question):
         answer = handle_reminder(question)
         print(f"Chatette: {answer}")
+        conversation_context["last_question"] = question
+        conversation_context["last_answer"] = answer
         return answer
 
     # Check if question is about Chatette herself
@@ -304,12 +416,25 @@ def ask(question: str) -> str:
         general_prompt = (
             f"You are Chatette, {USER_NAME}'s friendly personal assistant.\n"
             f"About {USER_NAME}: {USER_PROFILE}\n\n"
-            f"Answer the following question naturally in 1-2 sentences.\n\n"
+            f"Answer the following question naturally in 1-2 sentences.\n"
+            f"- Always respond in the same language the user used in their question.\n"
+            f"Always speak DIRECTLY to {USER_NAME} using 'you' and 'your'. Never refer to {USER_NAME} in third person.\n"
+            f"Do not invent information. If you don't know, say so honestly.\n\n"
             f"Question: {question}\n"
             f"Chatette:"
         )
         answer = llm.invoke(general_prompt).strip()
         print(f"Chatette: {answer}")
+        conversation_context["last_question"] = question
+        conversation_context["last_answer"] = answer
+        return answer
+
+    # Check if user wants to add a calendar event
+    if is_calendar_request(question):
+        answer = handle_calendar_event(question)
+        print(f"Chatette: {answer}")
+        conversation_context["last_question"] = question
+        conversation_context["last_answer"] = answer
         return answer
 
     # Step 1: Search each collection with relevance scores
@@ -317,7 +442,7 @@ def ask(question: str) -> str:
     best_score = float("inf")
 
     for collection in ["calendar", "emails", "notes", "documents"]:
-        k = 7 if collection == "emails" else 3
+        k = 5 if collection == "emails" else 3
         try:
             results = vectorstore.similarity_search_with_score(
                 question,
@@ -338,19 +463,30 @@ def ask(question: str) -> str:
     if best_score > RELEVANCE_THRESHOLD or not all_docs:
         print("Using general knowledge...")
         general_prompt = (
-            f"You are Chatette, {USER_NAME}'s friendly personal assistant.\n"
+            f"You are Chatette, a warm and knowledgeable personal assistant talking to {USER_NAME}.\n"
             f"About {USER_NAME}: {USER_PROFILE}\n\n"
-            f"Answer the following question naturally in 1-2 sentences.\n"
-            f"Do not invent information. If you don't know, say so honestly.\n\n"
+            f"Answer the following question in 1-2 sentences.\n"
+            f"- If the question is about {USER_NAME} personally, use the profile above.\n"
+            f"- Always respond in the same language the user used in their question.\n"
+            f"- If the question is about general knowledge (art, facts, recommendations, etc.), answer from your own knowledge.\n"
+            f"- Never invent personal information about {USER_NAME} that is not in the profile.\n"
+            f"- Never refer to {USER_NAME} in third person — always use 'you' and 'your'.\n\n"
             f"Question: {question}\n"
             f"Chatette:"
         )
         answer = llm.invoke(general_prompt).strip()
         print(f"Chatette: {answer}")
+        conversation_context["last_question"] = question
+        conversation_context["last_answer"] = answer
         return answer
 
     # Step 3: Build context from relevant chunks
     context = "\n\n".join([doc.page_content for doc in all_docs])
+
+    # Truncate context to avoid VRAM overflow
+    MAX_CONTEXT_CHARS = 2000
+    if len(context) > MAX_CONTEXT_CHARS:
+        context = context[:MAX_CONTEXT_CHARS] + "..."
 
     # Step 4: Add current date
     now = datetime.now()
@@ -374,6 +510,8 @@ The day after tomorrow is: {day_after}
 
     answer = llm.invoke(formatted_prompt).strip()
     print(f"Chatette: {answer}")
+    conversation_context["last_question"] = question
+    conversation_context["last_answer"] = answer
     return answer
 
 

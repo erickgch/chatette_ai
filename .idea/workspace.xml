@@ -2,23 +2,13 @@
 <project version="4">
   <component name="ChangeListManager">
     <list default="true" id="29976754-2f8a-4065-b0d9-c9dd5eb49e35" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/.env" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/AI Assistant.iml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/inspectionProfiles/profiles_settings.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/modules.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/api.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/chat.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/google_integration.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/ingestion.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/note_manager.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/rag.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/scheduler.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/testing_ground.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/voice.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/data/notes/test.txt" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.env" beforeDir="false" afterPath="$PROJECT_DIR$/.env" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/api.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/api.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/google_integration.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/google_integration.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/ingestion.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/ingestion.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/rag.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/rag.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/voice.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/voice.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -72,7 +62,7 @@
       <recent name="G:\PyCharm 2025.3.3\AI Assistant\data" />
     </key>
   </component>
-  <component name="RunManager" selected="Python.api">
+  <component name="RunManager">
     <configuration name="api" type="PythonConfigurationType" factoryName="Python" nameIsGenerated="true">
       <module name="AI Assistant" />
       <option name="ENV_FILES" value="" />
@@ -284,6 +274,9 @@
       <workItem from="1773223720589" duration="27773000" />
       <workItem from="1773483027212" duration="3348000" />
       <workItem from="1773509076713" duration="11400000" />
+      <workItem from="1773571875446" duration="3465000" />
+      <workItem from="1773577047536" duration="4232000" />
+      <workItem from="1773586144778" duration="3971000" />
     </task>
     <servers />
   </component>
@@ -302,12 +295,12 @@
     </breakpoint-manager>
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
-    <SUITE FILE_PATH="coverage/AI_Assistant$chat.coverage" NAME="chat Coverage Results" MODIFIED="1773520367381" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/core" />
+    <SUITE FILE_PATH="coverage/AI_Assistant$chat.coverage" NAME="chat Coverage Results" MODIFIED="1773588817725" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/core" />
     <SUITE FILE_PATH="coverage/AI_Assistant$google_integration.coverage" NAME="google_integration Coverage Results" MODIFIED="1773245822083" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/core" />
-    <SUITE FILE_PATH="coverage/AI_Assistant$ingestion.coverage" NAME="ingestion Coverage Results" MODIFIED="1773257359502" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/core" />
-    <SUITE FILE_PATH="coverage/AI_Assistant$voice.coverage" NAME="voice Coverage Results" MODIFIED="1773243886232" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/" />
-    <SUITE FILE_PATH="coverage/AI_Assistant$scheduler.coverage" NAME="scheduler Coverage Results" MODIFIED="1773483616249" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/core" />
-    <SUITE FILE_PATH="coverage/AI_Assistant$api.coverage" NAME="api Coverage Results" MODIFIED="1773509106015" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/" />
+    <SUITE FILE_PATH="coverage/AI_Assistant$ingestion.coverage" NAME="ingestion Coverage Results" MODIFIED="1773587589014" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/core" />
+    <SUITE FILE_PATH="coverage/AI_Assistant$scheduler.coverage" NAME="scheduler Coverage Results" MODIFIED="1773586351013" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/core" />
+    <SUITE FILE_PATH="coverage/AI_Assistant$voice.coverage" NAME="voice Coverage Results" MODIFIED="1773589273052" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/core" />
+    <SUITE FILE_PATH="coverage/AI_Assistant$api.coverage" NAME="api Coverage Results" MODIFIED="1773589506899" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/core" />
     <SUITE FILE_PATH="coverage/AI_Assistant$note_manager.coverage" NAME="note_manager Coverage Results" MODIFIED="1773256773826" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/" />
     <SUITE FILE_PATH="coverage/AI_Assistant$rag.coverage" NAME="rag Coverage Results" MODIFIED="1773485016306" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/core" />
     <SUITE FILE_PATH="coverage/AI_Assistant$testing_ground.coverage" NAME="testing_ground Coverage Results" MODIFIED="1773511620722" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/core" />

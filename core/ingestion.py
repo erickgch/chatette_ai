@@ -24,6 +24,7 @@ NOTES_PATH = os.getenv("NOTES_PATH")
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
 
 EMAIL_DAYS_WINDOW = int(os.getenv("EMAIL_DAYS_WINDOW", 14))
 CALENDAR_DAYS_AHEAD = int(os.getenv("CALENDAR_DAYS_AHEAD", 14))
@@ -50,7 +51,7 @@ def human_datetime(iso_string):
 # ==========================
 embeddings = OllamaEmbeddings(
     base_url=OLLAMA_BASE_URL,
-    model="nomic-embed-text"
+    model=EMBEDDING_MODEL
 )
 
 # ==========================
@@ -111,7 +112,7 @@ def ingest_file(filepath: str, collection: str = "documents"):
 
     vectorstore.add_documents(chunks)
 
-    print(f"✅ Ingested {len(chunks)} chunks from {path.name}")
+    #print(f"✅ Ingested {len(chunks)} chunks from {path.name}")
 
 
 # ==========================
@@ -141,7 +142,7 @@ def ingest_notes():
 
     if existing and existing["ids"]:
         vectorstore.delete(ids=existing["ids"])
-        print(f"🗑️ Cleared {len(existing['ids'])} old notes chunks")
+    #    print(f"🗑️ Cleared {len(existing['ids'])} old notes chunks")
 
     notes_path = Path(NOTES_PATH)
 
@@ -205,7 +206,7 @@ Description: {event.get('description', '')}
 
     vectorstore.add_documents(chunks)
 
-    print(f"✅ Ingested {len(chunks)} calendar chunks")
+    #print(f"✅ Ingested {len(chunks)} calendar chunks")
 
 
 # ==========================
@@ -257,7 +258,7 @@ Body:
 
     vectorstore.add_documents(chunks)
 
-    print(f"✅ Ingested {len(chunks)} email chunks")
+    #print(f"✅ Ingested {len(chunks)} email chunks")
 
 
 # ==========================
