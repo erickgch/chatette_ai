@@ -221,7 +221,7 @@ def get_recent_emails(max_results: int = 10, days_window: int = None) -> list:
                     errors="ignore"
                 )
 
-        body = body.strip()[:1000] if body else "No body content"
+        body = body.strip()[:400] if body else "No body content"
 
         formatted_emails.append({
             "subject": subject,

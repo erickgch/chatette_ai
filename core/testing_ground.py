@@ -1,10 +1,7 @@
-from note_manager import delete_reminder_by_line, get_all_reminders
+from ingestion import vectorstore
 
-print("Before:")
-print(get_all_reminders())
-
-result = delete_reminder_by_line("[2026-03-11 20:41] Dinner with Ines and Annika on March 12th, at 18h.")
-print(f"\nResult: {result}")
-
-print("\nAfter:")
-print(get_all_reminders())
+for collection in ["calendar", "emails", "notes", "documents"]:
+    results = vectorstore.get(where={"collection": collection})
+    print(f"\n📁 {collection}: {len(results['documents'])} chunks")
+    for doc in results["documents"]:
+        print(f"  - {doc[:80]}")

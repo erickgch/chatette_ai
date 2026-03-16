@@ -29,10 +29,29 @@ app = FastAPI(
 # ===== Request/Response Models =====
 class QuestionRequest(BaseModel):
     question: str
+    mode: str = "auto"  # "auto", "personal", "general"
+
 
 class AnswerResponse(BaseModel):
     question: str
     answer: str
+    mode: str
+
+
+@app.post("/chat", response_model=AnswerResponse)
+def chat(request: QuestionRequest):
+    print(f"📱 Received: question='{request.question}' mode='{request.mode}'")
+    if not request.question.strip():
+        raise HTTPException(status_code=400, detail="Question cannot be empty")
+    if request.mode not in ["auto", "personal", "general"]:
+        raise HTTPException(status_code=400, detail="Mode must be 'auto', 'personal', or 'general'")
+    answer = ask(request.question, mode=request.mode)
+    print(f"✅ Answer: '{answer[:80]}...'")
+    return AnswerResponse(
+        question=request.question,
+        answer=answer,
+        mode=request.mode
+    )
 
 # ===== Chat Endpoints =====
 @app.get("/")
@@ -138,6 +157,25 @@ def trigger_ingest_emails():
     """Manually trigger email ingestion."""
     ingest_emails()
     return {"status": "Email ingestion complete"}
+
+@app.get("/drafts")
+def get_drafts():
+    """List all saved drafts."""
+    from note_manager import get_all_drafts
+    return {"drafts": get_all_drafts()}
+
+@app.get("/drafts/{filename}")
+def get_draft(filename: str):
+    """Get content of a specific draft."""
+    from note_manager import get_draft_content
+    return {"content": get_draft_content(filename)}
+
+@app.get("/status")
+def status():
+    """Return server status and current LLM model."""
+    import os
+    model = os.getenv("GROQ_MODEL") if os.getenv("USE_GROQ", "false").lower() == "true" else os.getenv("OLLAMA_MODEL")
+    return {"status": "running", "model": model}
 
 # ===== Run server =====
 if __name__ == "__main__":
