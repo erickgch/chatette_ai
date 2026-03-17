@@ -38,7 +38,6 @@ def human_datetime(iso_string):
     """Convert ISO datetime to readable format."""
     if not iso_string:
         return "Unknown time"
-
     try:
         dt = datetime.fromisoformat(iso_string.replace("Z", "+00:00"))
         return dt.strftime("%A, %d %B %Y at %H:%M")
@@ -63,11 +62,16 @@ vectorstore = Chroma(
 )
 
 # ==========================
-# Text splitter
+# Text splitters
 # ==========================
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=500,
     chunk_overlap=50
+)
+
+email_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=330,
+    chunk_overlap=30
 )
 
 
@@ -87,7 +91,7 @@ def ingest_file(filepath: str, collection: str = "documents"):
         print(f"⚠️ Skipping empty file: {path.name}")
         return
 
-    # Also skip files with only whitespace
+    # Skip files with only whitespace
     content = path.read_text(encoding="utf-8").strip()
     if not content:
         print(f"⚠️ Skipping blank file: {path.name}")
@@ -112,15 +116,12 @@ def ingest_file(filepath: str, collection: str = "documents"):
 
     vectorstore.add_documents(chunks)
 
-    #print(f"✅ Ingested {len(chunks)} chunks from {path.name}")
-
 
 # ==========================
 # Documents ingestion
 # ==========================
 def ingest_all_documents():
     """Ingest all files in the documents folder."""
-
     docs_path = Path(DOCUMENTS_PATH)
 
     if not docs_path.exists():
@@ -136,23 +137,65 @@ def ingest_all_documents():
 # Notes ingestion
 # ==========================
 def ingest_notes():
-    """Ingest all notes, replacing old ones."""
+    """Ingest all notes (reminders, personal notes, drafts), replacing old ones."""
 
     existing = vectorstore.get(where={"collection": "notes"})
-
     if existing and existing["ids"]:
         vectorstore.delete(ids=existing["ids"])
-    #    print(f"🗑️ Cleared {len(existing['ids'])} old notes chunks")
 
     notes_path = Path(NOTES_PATH)
-
     if not notes_path.exists():
         print("Notes folder not found.")
         return
 
+    # Ingest top-level note files (reminders.txt, personal_notes.txt)
     for file in notes_path.iterdir():
         if file.is_file():
             ingest_file(str(file), collection="notes")
+
+    # Ingest drafts subfolder
+    drafts_path = notes_path / "drafts"
+    if drafts_path.exists():
+        for file in drafts_path.iterdir():
+            if file.is_file():
+                ingest_file(str(file), collection="notes")
+
+
+# ==========================
+# Lists ingestion
+# ==========================
+def ingest_lists():
+    """Ingest all list files, replacing old ones."""
+
+    existing = vectorstore.get(where={"collection": "lists"})
+    if existing and existing["ids"]:
+        vectorstore.delete(ids=existing["ids"])
+
+    lists_path = Path(NOTES_PATH) / "lists"
+    if not lists_path.exists():
+        print("Lists folder not found — skipping.")
+        return
+
+    for file in lists_path.iterdir():
+        if file.is_file() and file.suffix == ".txt":
+            # Skip empty files
+            if file.stat().st_size == 0:
+                print(f"⚠️ Skipping empty list: {file.name}")
+                continue
+            content = file.read_text(encoding="utf-8").strip()
+            if not content:
+                continue
+
+            print(f"Ingesting list: {file.name}...")
+            loader = TextLoader(str(file), encoding="utf-8")
+            documents = loader.load()
+            chunks = text_splitter.split_documents(documents)
+
+            for chunk in chunks:
+                chunk.metadata["collection"] = "lists"
+                chunk.metadata["source_file"] = file.name
+
+            vectorstore.add_documents(chunks)
 
 
 # ==========================
@@ -162,7 +205,6 @@ def ingest_calendar_events():
     """Fetch and ingest upcoming calendar events."""
 
     existing = vectorstore.get(where={"collection": "calendar"})
-
     if existing and existing["ids"]:
         vectorstore.delete(ids=existing["ids"])
         print(f"🗑️ Cleared {len(existing['ids'])} old calendar chunks")
@@ -179,7 +221,6 @@ def ingest_calendar_events():
     documents = []
 
     for event in events:
-
         start = human_datetime(event.get("start"))
         end = human_datetime(event.get("end"))
 
@@ -199,14 +240,10 @@ Description: {event.get('description', '')}
                 "source_file": "google_calendar"
             }
         )
-
         documents.append(doc)
 
     chunks = text_splitter.split_documents(documents)
-
     vectorstore.add_documents(chunks)
-
-    #print(f"✅ Ingested {len(chunks)} calendar chunks")
 
 
 # ==========================
@@ -216,7 +253,6 @@ def ingest_emails():
     """Fetch and ingest recent emails."""
 
     existing = vectorstore.get(where={"collection": "emails"})
-
     if existing and existing["ids"]:
         vectorstore.delete(ids=existing["ids"])
         print(f"🗑️ Cleared {len(existing['ids'])} old email chunks")
@@ -230,8 +266,12 @@ def ingest_emails():
     documents = []
 
     for email in emails:
-
         date = human_datetime(email.get("date"))
+
+        # Limit email body to 400 chars
+        body = email.get("body", "")
+        if body:
+            body = body.strip()[:400]
 
         text = f"""
 [Email]
@@ -241,7 +281,7 @@ Date: {date}
 Subject: {email.get('subject')}
 
 Body:
-{email.get('body')}
+{body}
 """
 
         doc = Document(
@@ -251,26 +291,24 @@ Body:
                 "source_file": "gmail"
             }
         )
-
         documents.append(doc)
 
-    chunks = text_splitter.split_documents(documents)
-
+    chunks = email_splitter.split_documents(documents)
     vectorstore.add_documents(chunks)
-
-    #print(f"✅ Ingested {len(chunks)} email chunks")
 
 
 # ==========================
 # Full ingestion
 # ==========================
 def ingest_all():
-
     print("\n📄 Ingesting documents...")
     ingest_all_documents()
 
     print("\n📝 Ingesting notes...")
     ingest_notes()
+
+    print("\n📋 Ingesting lists...")
+    ingest_lists()
 
     print("\n📅 Ingesting calendar events...")
     ingest_calendar_events()

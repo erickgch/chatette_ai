@@ -2,6 +2,7 @@ import datetime
 import os
 import pickle
 import base64
+import re
 
 from dotenv import load_dotenv
 from google.auth.transport.requests import Request
@@ -150,6 +151,12 @@ def create_calendar_event(title: str, start_datetime: str, end_datetime: str = N
 # ========================
 # Gmail
 # ========================
+def _clean_email_body(body: str) -> str:
+    """Remove URLs and excessive whitespace from email body."""
+    body = re.sub(r'http\S+', '', body)  # remove URLs
+    body = re.sub(r'\s+', ' ', body)     # collapse whitespace
+    return body.strip()[:400]
+
 def get_recent_emails(max_results: int = 10, days_window: int = None) -> list:
     """Fetch recent emails within time window."""
 
@@ -211,29 +218,24 @@ def get_recent_emails(max_results: int = 10, days_window: int = None) -> list:
                         )
                         break
 
+
         elif "body" in payload:
-
             data = payload["body"].get("data")
-
             if data:
                 body = base64.urlsafe_b64decode(data).decode(
                     "utf-8",
                     errors="ignore"
                 )
-
-        body = body.strip()[:400] if body else "No body content"
-
+        body = _clean_email_body(body) if body else "No body content"  # ← fixed
         formatted_emails.append({
             "subject": subject,
             "from": sender,
             "date": date,
             "body": body
         })
-
     #print(f"✅ Found {len(formatted_emails)} emails")
 
     return formatted_emails
-
 
 # ========================
 # Test

@@ -1,7 +1,6 @@
 from ingestion import vectorstore
-
-for collection in ["calendar", "emails", "notes", "documents"]:
-    results = vectorstore.get(where={"collection": collection})
-    print(f"\n📁 {collection}: {len(results['documents'])} chunks")
-    for doc in results["documents"]:
-        print(f"  - {doc[:80]}")
+results = vectorstore.get(where={"collection": "lists"})
+for doc, meta in zip(results["documents"], results["metadatas"]):
+    print(meta)
+    print(doc[:200])
+    print("---")

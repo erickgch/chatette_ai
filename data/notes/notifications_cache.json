@@ -1,0 +1,10 @@
+{
+  "generated_at": "2026-03-17T17:22:06.803450",
+  "valid_until": "2026-03-17T23:59:59.803450",
+  "has_reminders": true,
+  "notifications": {
+    "9h": "Good morning Erick, hope you're having a great start to the day, don't forget you've got a trip to Aldi planned for this afternoon after work. Have a fantastic day and stay on track, you've got this.",
+    "12h": "Lunchtime check-in, Erick, hope you're having a great day so far. Don't forget you've got a busy weekend ahead with helping Leonie move, but for now, take a break and refuel, you've got this.",
+    "18h": "Evening, Erick, hope you had a great day and are looking forward to unwinding. Don't forget to stop by Aldi after work tomorrow, and I've got your Saturday marked for helping Leonie with her move, you're almost there, have a wonderful evening and stay relaxed."
+  }
+}

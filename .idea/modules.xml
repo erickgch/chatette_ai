@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/AI Assistant.iml" filepath="$PROJECT_DIR$/.idea/AI Assistant.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Chatette_AI.iml" filepath="$PROJECT_DIR$/.idea/Chatette_AI.iml" />
     </modules>
   </component>
 </project>
