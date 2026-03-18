@@ -412,6 +412,41 @@ def get_notifications_cache():
 
 
 # ===================================
+# Sync
+# ===================================
+
+class SyncPushRequest(BaseModel):
+    reminders: dict = {}
+    personal_notes: dict = {}
+    lists: list = []
+
+
+@app.get("/sync/pull")
+def sync_pull():
+    """Return current state of all data for phone to cache."""
+    from sync_manager import build_pull_response
+    return build_pull_response()
+
+
+@app.post("/sync/push")
+def sync_push(request: SyncPushRequest):
+    """Receive phone changes and apply to PC files."""
+    from sync_manager import apply_push
+    from ingestion import ingest_notes, ingest_lists
+    result = apply_push({
+        "reminders": request.reminders,
+        "personal_notes": request.personal_notes,
+        "lists": request.lists
+    })
+    # Re-ingest anything that changed
+    if any("list" in u for u in result["updated"]):
+        ingest_lists()
+    if any(u in ["reminders", "personal_notes"] for u in result["updated"]):
+        ingest_notes()
+    return result
+
+
+# ===================================
 # Run server
 # ===================================
 

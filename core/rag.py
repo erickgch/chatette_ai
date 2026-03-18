@@ -61,42 +61,57 @@ def llm_invoke(prompt: str) -> str:
     return str(response)
 
 
-# Custom prompt
-prompt_template = PromptTemplate(
-    template="""You are Chatette, a warm and friendly personal assistant.
-You are talking to {user_name}. About {user_name}: {user_profile}
+# ===================================
+# PERSONALITY
+# ===================================
 
+CHATETTE_PERSONA = """You are Chatette — a small robotic cat and personal assistant to {user_name}.
+About {user_name}: {user_profile}
+
+Your personality:
+- Warm, friendly and competent — like a smart friend who always has things under control.
+- You have your own voice. Not a generic AI bot. Not a corporate assistant.
+- Direct and accurate. You answer first, add warmth second.
+- Rarely — maybe once every 5-6 responses — use a cool casual phrase naturally.
+  When you do, pick from: "On it.", "Consider it done.", "Locked in.", "Done and dusted.",
+  "Nothing on the radar.", "All clear.", "Heads up —", "Quick one:",
+  "You're all set.", "Just keeping you in the loop."
+  Most responses should NOT start with these phrases.
+- Very rarely, a subtle cat hint slips through — natural, never cheesy.
+  Examples: "I've had my eye on that.", "That one slipped through my paws."
+- Never over-explain or pad responses with unnecessary pleasantries.
+- Never apologize unnecessarily.
+- Always respond in the same language the user used."""
+
+CHATETTE_RULES = """
 STRICT RULES:
 - Only answer what was specifically asked. Nothing more.
-- If the user asks about appointments, only mention appointments. Do not mention shopping or other topics.
-- Never volunteer extra information that wasn't asked for.
 - Keep answers to 1-3 sentences maximum.
-- Never calculate days of the week from memory — always derive them from the current date provided in the context.
-- Always respond in the same language of the QUESTION, not the language of the context.
+- Never calculate days of the week from memory — derive them from the current date in context.
+- Always respond in the same language of the QUESTION, not the context.
 - If the question refers to a previous exchange, use it to answer correctly.
+- Never invent personal information not in the profile.
+- Never refer to {user_name} in third person — use 'you' and 'your'."""
+
+
+# Custom RAG prompt
+prompt_template = PromptTemplate(
+    template=CHATETTE_PERSONA + CHATETTE_RULES + """
 
 If you don't find the answer in the context, say so briefly.
 
-Example:
+Examples:
 Context: Today is Monday, March 16, 2026. Calendar event: Dentist on Wednesday, March 18 at 10am.
 {user_name}: Do I have anything this week?
-Chatette: Yes! You've got a dentist appointment on Wednesday at 10am. Don't forget!
+Chatette: Heads up — dentist on Wednesday at 10am. You're all set for the rest of the week.
 
-Example:
 Context: User enjoys technology and building AI assistants.
 {user_name}: Can you recommend a podcast?
-Chatette: Since you're into tech and AI, you might enjoy Lex Fridman's podcast or the TWIML AI Podcast!
+Chatette: Given your interest in tech and AI — Lex Fridman or TWIML AI Podcast are worth your time.
 
-Example:
-Context: Today is Sunday, March 15, 2026. Tomorrow is Monday, March 16, 2026.
-Calendar event: Dentist on Wednesday, March 18 at 10am.
-{user_name}: Do I have anything next Saturday?
-Chatette: Yes! You've got gym on Saturday, March 21st at 9am. Have a good workout!
-
-Example:
-Context: Previous exchange: User: "what is the capital of Mexico?" Chatette: "Mexico City has been the capital since 1521."
+Context: Previous exchange: User asked about capital of Mexico. Chatette said Mexico City.
 {user_name}: since when?
-Chatette: Mexico City has been the capital since 1521, when it was founded on the ruins of Tenochtitlan after the Spanish conquest.
+Chatette: Mexico City has been the capital since 1521, founded on the ruins of Tenochtitlan after the Spanish conquest.
 
 Context:
 {context}
@@ -244,6 +259,14 @@ def _build_conversation_context() -> str:
     return ""
 
 
+def _persona_prompt() -> str:
+    """Return the base persona prompt with user info filled in."""
+    return CHATETTE_PERSONA.format(
+        user_name=USER_NAME,
+        user_profile=USER_PROFILE
+    )
+
+
 # ===================================
 # HANDLERS
 # ===================================
@@ -258,12 +281,12 @@ def handle_reminder(question: str) -> str:
 {previous_context}
 The user wants to save this reminder: "{question}"
 
-Your job: extract ONLY the reminder text itself. Nothing else.
-- Remove trigger phrases like "write down", "remind me", "make a note", "note that", "write that down"
-- If the user refers to something from the previous exchange (e.g. "that", "it", "this"), resolve it using the previous exchange above
+Extract ONLY the reminder text. Nothing else.
+- Remove trigger phrases like "write down", "remind me", "make a note", "note that"
+- If the user refers to something from the previous exchange, resolve it
 - If a date is mentioned, convert it to an actual calendar date
 - If NO date is mentioned, return the reminder exactly as stated
-- Return ONLY the reminder text — no explanations, no extra sentences
+- Return ONLY the reminder text — no explanations
 
 Examples:
 Input: "write down buy green pesto"
@@ -272,7 +295,7 @@ Output: Buy green pesto
 Input: "remind me dentist next Friday"
 Output: Dentist appointment on Friday, March 20, 2026
 
-Previous exchange: User asked if they have toilet paper. Chatette said no info available.
+Previous exchange: User asked if they have toilet paper. Chatette said no info.
 Input: "write that down please"
 Output: Buy toilet paper
 
@@ -283,22 +306,22 @@ Output:"""
     reminder_text = reminder_text.split("\n")[0].strip().strip('"').strip("'")
 
     if all_reminders != "No reminders found.":
-        conflict_prompt = f"""You are checking a list of reminders for duplicates or conflicts.
+        conflict_prompt = f"""Check this list of reminders for duplicates or conflicts.
 
-New reminder to save: "{reminder_text}"
+New reminder: "{reminder_text}"
 
 Existing reminders:
 {all_reminders}
 
 Rules:
-- Only flag CONFLICT or DUPLICATE for reminders that involve a specific date or time
-- Shopping items, tasks, and general notes should always be CLEAR
-- Only flag DUPLICATE if the exact same reminder already exists
+- Only flag CONFLICT or DUPLICATE for reminders with a specific date or time
+- Shopping items, tasks, general notes: always CLEAR
+- DUPLICATE only if the exact same reminder already exists
 
 Reply with one of:
-- "DUPLICATE: <exact line>" if the exact same reminder already exists
-- "CONFLICT: <exact line>" if it is a different event on the exact same date AND time
-- "CLEAR" if there are no issues or if the reminder has no date
+- "DUPLICATE: <exact line>"
+- "CONFLICT: <exact line>"
+- "CLEAR"
 """
         conflict_check = llm_invoke(conflict_prompt).strip()
         print(f"Conflict check: '{conflict_check}'")
@@ -309,8 +332,8 @@ Reply with one of:
                 "text": reminder_text, "action": "save",
                 "conflict": "duplicate", "line_to_delete": existing_line
             })
-            return (f"You already have something similar: '{existing_line}'. "
-                    f"Do you want to replace it with '{reminder_text}'?")
+            return (f"Heads up — you already have something similar: '{existing_line}'. "
+                    f"Want to replace it with '{reminder_text}'?")
 
         elif conflict_check.startswith("CONFLICT:"):
             existing_line = conflict_check.replace("CONFLICT:", "").strip()
@@ -318,50 +341,47 @@ Reply with one of:
                 "text": reminder_text, "action": "save",
                 "conflict": "conflict", "line_to_delete": existing_line
             })
-            return (f"Heads up - you already have '{existing_line}' around that time. "
-                    f"Do you still want to save '{reminder_text}'?")
+            return (f"Quick one — you already have '{existing_line}' around that time. "
+                    f"Still want to save '{reminder_text}'?")
 
     pending_reminder.update({
         "text": reminder_text, "action": "save",
         "conflict": None, "line_to_delete": None
     })
-    return f"Just to confirm - should I save this to reminders: '{reminder_text}'?"
+    return f"Just to confirm — save this to reminders: '{reminder_text}'?"
 
 
 def handle_delete(question: str) -> str:
     """Use LLM to find matching reminder and ask confirmation."""
     all_reminders = get_all_reminders()
     if all_reminders == "No reminders found.":
-        return "You don't have any saved reminders."
+        return "Nothing on your reminder list."
 
     previous_context = _build_conversation_context()
 
-    match_prompt = f"""You are helping delete a reminder from a list.
+    match_prompt = f"""Find the reminder to delete.
 {previous_context}
 The user wants to delete: "{question}"
 
-Here is the COMPLETE list of reminders:
+Reminders:
 {all_reminders}
 
-Instructions:
-- Find the one that best matches what the user wants to delete
-- If the user says "that" or "it", use the previous exchange to identify what they mean
+- Find the best match, even if wording differs
+- If the user says "that" or "it", use the previous exchange
 - Return ONLY the exact line including the timestamp
-- If nothing matches, return NO_MATCH
-
-Your answer:"""
+- If nothing matches, return NO_MATCH"""
 
     matched_line = llm_invoke(match_prompt).strip().strip('"').strip("'")
     print(f"LLM matched: '{matched_line}'")
 
     if "NO_MATCH" in matched_line or not matched_line:
-        return "I couldn't find a matching reminder. Could you be more specific?"
+        return "Nothing matching that in your reminders. Can you be more specific?"
 
     pending_reminder.update({
         "text": None, "action": "delete",
         "conflict": None, "line_to_delete": matched_line
     })
-    return f"Should I delete this reminder: '{matched_line}'?"
+    return f"Delete this one: '{matched_line}'?"
 
 
 def handle_personal_note(question: str) -> str:
@@ -370,12 +390,11 @@ def handle_personal_note(question: str) -> str:
 
     extraction_prompt = f"""The user said: "{question}"
 {previous_context}
-Extract ONLY the note content they want to save.
-- Remove trigger phrases like "add to my personal notes", "add to my diary", "add to my journal"
+Extract ONLY the note content to save.
+- Remove trigger phrases like "add to my personal notes", "add to my diary"
 - If the user refers to something from the previous exchange, resolve it
-- Return ONLY the note text, nothing else
+- Return ONLY the note text
 
-Now extract from: "{question}"
 Output:"""
 
     note_text = llm_invoke(extraction_prompt).strip()
@@ -385,7 +404,7 @@ Output:"""
         "text": note_text, "action": "personal_note",
         "conflict": None, "line_to_delete": None, "event_data": None
     })
-    return f"Should I add this to your personal notes: '{note_text}'?"
+    return f"Add this to your personal notes: '{note_text}'?"
 
 
 def handle_draft(question: str) -> str:
@@ -398,9 +417,9 @@ def handle_draft(question: str) -> str:
 {previous_context}
 The user said: "{question}"
 
-Extract the type and purpose of the draft.
-Return ONLY a JSON object with:
-- type: type of document (e.g. "email", "letter", "message")
+Extract the draft type and purpose.
+Return ONLY a JSON object:
+- type: document type (e.g. "email", "letter", "message")
 - purpose: what it's about
 
 Output:"""
@@ -418,12 +437,12 @@ Output:"""
 
     draft_prompt = f"""Today is {current_date}.
 {previous_context}
-You are helping {USER_NAME} write a {draft_type} {draft_purpose}.
-Write a professional, well-structured {draft_type}.
-Use [placeholder] for unknown info.
-Keep it concise.
+Write a {draft_type} {draft_purpose} for {USER_NAME}.
+- Professional and well-structured
+- Use [placeholder] for unknown details
+- Concise
 
-Write the {draft_type} now:"""
+Write the {draft_type}:"""
 
     draft_content = llm_invoke(draft_prompt).strip()
     title = f"{draft_type}_{draft_purpose.replace(' ', '_')[:30]}"
@@ -433,7 +452,7 @@ Write the {draft_type} now:"""
         "conflict": None, "line_to_delete": title,
         "event_data": {"type": draft_type, "purpose": draft_purpose}
     })
-    return f"Here's a draft {draft_type} {draft_purpose}:\n\n{draft_content}\n\nShould I save this draft?"
+    return f"Here's a draft {draft_type} {draft_purpose}:\n\n{draft_content}\n\nWant me to save this?"
 
 
 def handle_create_list(question: str) -> str:
@@ -446,10 +465,10 @@ def handle_create_list(question: str) -> str:
 {previous_context}
 The user said: "{question}"
 
-Extract the list title and items they want to create.
-Return ONLY a JSON object with:
-- title: name of the list (e.g. "Shopping List", "Packing List")
-- items: array of items to add (empty array if none mentioned)
+Extract list title and items.
+Return ONLY a JSON object:
+- title: list name
+- items: array of items (empty if none mentioned)
 
 Examples:
 Input: "create a shopping list with milk, eggs and bread"
@@ -457,9 +476,6 @@ Output: {{"title": "Shopping List", "items": ["Milk", "Eggs", "Bread"]}}
 
 Input: "make a packing list for my weekend trip"
 Output: {{"title": "Packing List Weekend Trip", "items": []}}
-
-Input: "create a list"
-Output: {{"title": "New List", "items": []}}
 
 Output:"""
 
@@ -473,14 +489,14 @@ Output:"""
 
     title = list_data.get("title", "New List")
     items = list_data.get("items", [])
-    items_preview = ", ".join(items) if items else "empty list"
+    items_preview = ", ".join(items) if items else "empty for now"
 
     pending_reminder.update({
         "text": title, "action": "create_list",
         "conflict": None, "line_to_delete": None,
         "event_data": {"title": title, "items": items}
     })
-    return f"Should I create a list called '{title}' with: {items_preview}?"
+    return f"Create a list called '{title}' — {items_preview}?"
 
 
 def handle_add_to_list(question: str) -> str:
@@ -489,7 +505,7 @@ def handle_add_to_list(question: str) -> str:
     all_lists = get_all_lists()
 
     if not all_lists:
-        return "You don't have any lists yet. Would you like to create one?"
+        return "No lists yet — want to create one first?"
 
     lists_summary = "\n".join([f"- {l['filename']}" for l in all_lists])
 
@@ -499,17 +515,10 @@ def handle_add_to_list(question: str) -> str:
 Available lists:
 {lists_summary}
 
-Extract what they want to add and to which list.
-Return ONLY a JSON object with:
+Extract item and target list.
+Return ONLY a JSON object:
 - item: the item to add
-- list_name: the name or filename of the target list
-
-Examples:
-Input: "add toothpaste to my shopping list"
-Output: {{"item": "Toothpaste", "list_name": "shopping"}}
-
-Input: "add sunscreen to the packing list"
-Output: {{"item": "Sunscreen", "list_name": "packing"}}
+- list_name: target list name or filename
 
 Output:"""
 
@@ -519,24 +528,24 @@ Output:"""
     try:
         data = json.loads(response)
     except json.JSONDecodeError:
-        return "I had trouble understanding. Could you be more specific?"
+        return "Didn't quite catch that — can you be more specific?"
 
     item = data.get("item", "")
     list_name = data.get("list_name", "")
 
     if not item:
-        return "I couldn't identify what you want to add. Could you be more specific?"
+        return "What would you like to add to the list?"
 
     filename = find_list_by_name(list_name)
     if not filename:
-        return f"I couldn't find a list matching '{list_name}'. Check your lists in the documents folder."
+        return f"No list matching '{list_name}' on file."
 
     pending_reminder.update({
         "text": item, "action": "add_to_list",
         "conflict": None, "line_to_delete": filename,
         "event_data": {"item": item, "filename": filename}
     })
-    return f"Should I add '{item}' to '{filename}'?"
+    return f"Add '{item}' to '{filename}'?"
 
 
 def handle_delete_list(question: str) -> str:
@@ -545,7 +554,7 @@ def handle_delete_list(question: str) -> str:
     all_lists = get_all_lists()
 
     if not all_lists:
-        return "You don't have any lists to delete."
+        return "No lists to delete — all clear."
 
     lists_summary = "\n".join([f"- {l['filename']}" for l in all_lists])
 
@@ -554,22 +563,20 @@ def handle_delete_list(question: str) -> str:
 Available lists:
 {lists_summary}
 
-Return ONLY the exact filename of the list to delete.
-If nothing matches, return NO_MATCH.
-
-Your answer:"""
+Return ONLY the exact filename to delete.
+If nothing matches, return NO_MATCH."""
 
     matched = llm_invoke(match_prompt).strip().strip('"').strip("'")
 
     if "NO_MATCH" in matched or not matched:
-        return "I couldn't find a matching list. Could you be more specific?"
+        return "Nothing matching that in your lists — can you be more specific?"
 
     pending_reminder.update({
         "text": matched, "action": "delete_list",
         "conflict": None, "line_to_delete": matched,
         "event_data": None
     })
-    return f"Should I delete the list '{matched}'? This cannot be undone."
+    return f"About to delete '{matched}' — this can't be undone. You sure?"
 
 
 def handle_calendar_event(question: str) -> str:
@@ -581,9 +588,9 @@ def handle_calendar_event(question: str) -> str:
     extraction_prompt = f"""Today is {current_date}.
 {previous_context}The user said: "{question}"
 
-Extract the calendar event details and return ONLY a JSON object:
+Extract calendar event details. Return ONLY a JSON object:
 - title: event name
-- start: ISO 8601 datetime (e.g. 2026-03-20T10:00:00)
+- start: ISO 8601 datetime
 - end: ISO 8601 datetime (null if not specified)
 - description: extra details (empty if none)
 - attendees: list of email addresses (empty list if none)
@@ -596,7 +603,7 @@ Return ONLY the JSON.
     try:
         event_data = json.loads(response)
     except json.JSONDecodeError:
-        return "I had trouble understanding the event details. Could you be more specific?"
+        return "Couldn't parse the event details — try again?"
 
     print(f"📅 Extracted event: {event_data}")
 
@@ -606,9 +613,9 @@ Return ONLY the JSON.
         "line_to_delete": None, "event_data": event_data
     })
 
-    confirmation = f"Should I add '{event_data['title']}' to your Google Calendar on {event_data['start']}?"
+    confirmation = f"Lock in '{event_data['title']}' on {event_data['start']}?"
     if event_data.get("attendees"):
-        confirmation += f" I'll also invite: {', '.join(event_data['attendees'])}"
+        confirmation += f" I'll invite {', '.join(event_data['attendees'])} too."
     return confirmation
 
 
@@ -616,15 +623,17 @@ def handle_view_reminders(question: str) -> str:
     """Return all current reminders directly from file."""
     reminders = get_all_reminders()
     if reminders == "No reminders found.":
-        return "You don't have any reminders saved at the moment."
+        return "All clear — nothing on your reminder list."
 
-    format_prompt = f"""The user asked: "{question}"
+    format_prompt = f"""{_persona_prompt()}
 
-Here are their current reminders:
+The user asked: "{question}"
+
+Their reminders:
 {reminders}
 
-Present these reminders naturally and concisely.
-Always respond in the same language the user used."""
+Present these in a friendly, natural way — warm but concise.
+Respond in the same language the user used."""
 
     return llm_invoke(format_prompt).strip()
 
@@ -655,7 +664,7 @@ def handle_confirmation(question: str) -> str:
             save_reminder(reminder_text)
             ingest_notes()
             _clear_pending()
-            return f"Got it! Added '{reminder_text}' to reminders!"
+            return f"On it — '{reminder_text}' is on your list."
 
         elif action == "delete":
             result = delete_reminder_by_line(line_to_delete)
@@ -667,13 +676,13 @@ def handle_confirmation(question: str) -> str:
             save_personal_note(reminder_text)
             ingest_notes()
             _clear_pending()
-            return "Got it! Added to your personal notes."
+            return "Done and dusted — added to your personal notes."
 
         elif action == "draft":
             filename = save_draft(line_to_delete, reminder_text)
             ingest_notes()
             _clear_pending()
-            return f"Done! Draft saved as '{filename}' in your drafts folder."
+            return f"Saved as '{filename}' in your drafts. You're all set."
 
         elif action == "create_list":
             title = event_data["title"]
@@ -681,7 +690,7 @@ def handle_confirmation(question: str) -> str:
             filename = create_list(title, items)
             ingest_lists()
             _clear_pending()
-            return f"Done! Created list '{title}' — find it in your documents folder."
+            return f"List '{title}' is ready — find it in your documents."
 
         elif action == "add_to_list":
             item = event_data["item"]
@@ -689,17 +698,17 @@ def handle_confirmation(question: str) -> str:
             add_item_to_list(filename, item)
             ingest_lists()
             _clear_pending()
-            return f"Done! Added '{item}' to your list."
+            return f"'{item}' is on the list."
 
         elif action == "delete_list":
             success = delete_list(line_to_delete)
             ingest_lists()
             _clear_pending()
-            return f"Done! Deleted list '{line_to_delete}'." if success else "Something went wrong deleting the list."
+            return f"List '{line_to_delete}' deleted." if success else "Something went wrong — try again?"
 
         elif action == "calendar":
             if event_data is None:
-                return "Something went wrong — I lost the event details. Could you try again?"
+                return "Lost the event details somewhere — try again?"
             create_calendar_event(
                 title=event_data["title"],
                 start_datetime=event_data["start"],
@@ -709,32 +718,32 @@ def handle_confirmation(question: str) -> str:
             )
             ingest_calendar_events()
             _clear_pending()
-            result = f"Done! I've added '{event_data['title']}' to your Google Calendar!"
+            result = f"Locked in — '{event_data['title']}' is on your calendar."
             if event_data.get("attendees"):
-                result += f" Invitations sent to: {', '.join(event_data['attendees'])}"
+                result += f" Invitations sent to {', '.join(event_data['attendees'])}."
             return result
 
     elif is_no:
         _clear_pending()
-        return "No problem, I've discarded it!"
+        return "No problem — consider it dropped."
 
     else:
         if action == "save":
-            return f"Should I save '{reminder_text}' to reminders? Just say yes or no."
+            return f"Save '{reminder_text}' to reminders? Yes or no."
         elif action == "delete":
-            return f"Should I delete '{line_to_delete}'? Just say yes or no."
+            return f"Delete '{line_to_delete}'? Yes or no."
         elif action == "personal_note":
-            return "Should I add this to your personal notes? Just say yes or no."
+            return "Add this to your personal notes? Yes or no."
         elif action == "draft":
-            return "Should I save this draft? Just say yes or no."
+            return "Save this draft? Yes or no."
         elif action == "create_list":
-            return f"Should I create the list '{event_data['title']}'? Just say yes or no."
+            return f"Create list '{event_data['title']}'? Yes or no."
         elif action == "add_to_list":
-            return f"Should I add '{event_data['item']}' to the list? Just say yes or no."
+            return f"Add '{event_data['item']}' to the list? Yes or no."
         elif action == "delete_list":
-            return f"Should I delete the list '{line_to_delete}'? Just say yes or no."
+            return f"Delete '{line_to_delete}'? Yes or no."
         elif action == "calendar":
-            return f"Should I add '{event_data['title']}' to your calendar? Just say yes or no."
+            return f"Lock in '{event_data['title']}' on your calendar? Yes or no."
 
 
 # ===================================
@@ -773,16 +782,15 @@ def ask(question: str, mode: str = "auto") -> str:
 
     # 4. About Chatette
     if is_about_chatette(question):
-        general_prompt = (
-            f"You are Chatette, {USER_NAME}'s friendly personal assistant.\n"
-            f"About {USER_NAME}: {USER_PROFILE}\n\n"
+        about_prompt = (
+            f"{_persona_prompt()}\n\n"
             f"{_build_conversation_context()}"
             f"Answer naturally in 1-2 sentences.\n"
             f"Always respond in the same language the user used.\n\n"
             f"Question: {question}\n"
             f"Chatette:"
         )
-        answer = llm_invoke(general_prompt).strip()
+        answer = llm_invoke(about_prompt).strip()
         print(f"Chatette: {answer}")
         conversation_context["last_question"] = question
         conversation_context["last_answer"] = answer
@@ -846,20 +854,19 @@ def ask(question: str, mode: str = "auto") -> str:
 
     # ===== MODE HANDLING =====
 
+    _general_prompt_base = (
+        f"{_persona_prompt()}\n\n"
+        f"{_build_conversation_context()}"
+        f"Answer the following question in 1-2 sentences.\n"
+        f"- Always respond in the same language the user used.\n"
+        f"- If the question refers to the previous exchange, use it.\n\n"
+        f"Question: {{question}}\n"
+        f"Chatette:"
+    )
+
     if mode == "general":
         print("Mode: general knowledge")
-        general_prompt = (
-            f"You are Chatette, a warm and knowledgeable personal assistant talking to {USER_NAME}.\n"
-            f"About {USER_NAME}: {USER_PROFILE}\n\n"
-            f"{_build_conversation_context()}"
-            f"Answer the following question in 1-2 sentences.\n"
-            f"- Always respond in the same language the user used in their QUESTION.\n"
-            f"- If the question refers to the previous exchange, use it to answer.\n"
-            f"- Never invent personal information about {USER_NAME}.\n"
-            f"- Never refer to {USER_NAME} in third person.\n\n"
-            f"Question: {question}\n"
-            f"Chatette:"
-        )
+        general_prompt = _general_prompt_base.format(question=question)
         answer = llm_invoke(general_prompt).strip()
         print(f"Chatette: {answer}")
         conversation_context["last_question"] = question
@@ -896,6 +903,7 @@ Tomorrow is: {tomorrow}
 The day after tomorrow is: {day_after}
 
 {_build_conversation_context()}{context}"""
+
         formatted_prompt = prompt_template.format(
             context=context, question=question,
             user_name=USER_NAME, user_profile=USER_PROFILE
@@ -929,18 +937,7 @@ The day after tomorrow is: {day_after}
 
     if best_score > RELEVANCE_THRESHOLD or not all_docs:
         print("Using general knowledge...")
-        general_prompt = (
-            f"You are Chatette, a warm and knowledgeable personal assistant talking to {USER_NAME}.\n"
-            f"About {USER_NAME}: {USER_PROFILE}\n\n"
-            f"{_build_conversation_context()}"
-            f"Answer the following question in 1-2 sentences.\n"
-            f"- Always respond in the same language the user used in their QUESTION.\n"
-            f"- If the question refers to the previous exchange, use it to answer.\n"
-            f"- Never invent personal information about {USER_NAME}.\n"
-            f"- Never refer to {USER_NAME} in third person.\n\n"
-            f"Question: {question}\n"
-            f"Chatette:"
-        )
+        general_prompt = _general_prompt_base.format(question=question)
         answer = llm_invoke(general_prompt).strip()
         print(f"Chatette: {answer}")
         conversation_context["last_question"] = question
@@ -962,7 +959,7 @@ Tomorrow is: {tomorrow}
 The day after tomorrow is: {day_after}
 
 {_build_conversation_context()}{context}"""
-    print(f"📄 Context being sent:\n{context}\n---")
+
     formatted_prompt = prompt_template.format(
         context=context, question=question,
         user_name=USER_NAME, user_profile=USER_PROFILE
