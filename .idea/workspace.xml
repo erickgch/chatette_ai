@@ -2,14 +2,12 @@
 <project version="4">
   <component name="ChangeListManager">
     <list default="true" id="29976754-2f8a-4065-b0d9-c9dd5eb49e35" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/core/sync_manager.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.env" beforeDir="false" afterPath="$PROJECT_DIR$/.env" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/core/api.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/api.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/core/rag.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/rag.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/scheduler.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/scheduler.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/settings_manager.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/settings_manager.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/data/notes/lists/cats.txt" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/data/notes/notifications_cache.json" beforeDir="false" afterPath="$PROJECT_DIR$/data/notes/notifications_cache.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/data/notes/personal_notes.txt" beforeDir="false" afterPath="$PROJECT_DIR$/data/notes/personal_notes.txt" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -333,7 +331,7 @@
       <workItem from="1773676797436" duration="511000" />
       <workItem from="1773677350563" duration="322000" />
       <workItem from="1773732998374" duration="21451000" />
-      <workItem from="1773825256705" duration="13447000" />
+      <workItem from="1773825256705" duration="15932000" />
     </task>
     <servers />
   </component>
@@ -366,6 +364,6 @@
     <SUITE FILE_PATH="coverage/AI_Assistant$api.coverage" NAME="api Coverage Results" MODIFIED="1773664567396" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/core" />
     <SUITE FILE_PATH="coverage/Chatette_AI$sync_manager.coverage" NAME="sync_manager Coverage Results" MODIFIED="1773831971458" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/core" />
     <SUITE FILE_PATH="coverage/Chatette_AI$ingestion.coverage" NAME="ingestion Coverage Results" MODIFIED="1773677507799" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/core" />
-    <SUITE FILE_PATH="coverage/Chatette_AI$api.coverage" NAME="api Coverage Results" MODIFIED="1773844063160" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/core" />
+    <SUITE FILE_PATH="coverage/Chatette_AI$api.coverage" NAME="api Coverage Results" MODIFIED="1773848715346" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/core" />
   </component>
 </project>

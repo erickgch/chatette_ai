@@ -8,7 +8,7 @@ from note_manager import (
     save_reminder, delete_reminder_by_line, get_all_reminders,
     save_personal_note, save_draft,
     create_list, add_item_to_list, find_list_by_name,
-    get_all_lists, delete_list
+    get_all_lists, delete_list, get_list_items, delete_list_item
 )
 from datetime import datetime, timedelta
 from google_integration import create_calendar_event
@@ -55,10 +55,33 @@ else:
 
 def llm_invoke(prompt: str) -> str:
     """Invoke LLM and always return a plain string."""
-    response = llm.invoke(prompt)
-    if hasattr(response, 'content'):
-        return response.content
-    return str(response)
+    try:
+        response = llm.invoke(prompt)
+        if hasattr(response, 'content'):
+            return response.content
+        return str(response)
+    except Exception as e:
+        error_str = str(e).lower()
+        if "rate limit" in error_str or "429" in error_str or "too many" in error_str or "quota" in error_str:
+            raise RateLimitError("Groq rate limit reached")
+        raise
+
+
+class RateLimitError(Exception):
+    pass
+
+
+# ===================================
+# TRANSLATION HELPER
+# ===================================
+
+def _t(en: str, de: str, es: str, lang: str) -> str:
+    """Return the right translation based on language code."""
+    if lang == "de":
+        return de
+    if lang == "es":
+        return es
+    return en
 
 
 # ===================================
@@ -72,11 +95,7 @@ Your personality:
 - Warm, friendly and competent — like a smart friend who always has things under control.
 - You have your own voice. Not a generic AI bot. Not a corporate assistant.
 - Direct and accurate. You answer first, add warmth second.
-- Rarely — maybe once every 5-6 responses — use a cool casual phrase naturally.
-  When you do, pick from: "On it.", "Consider it done.", "Locked in.", "Done and dusted.",
-  "Nothing on the radar.", "All clear.", "Heads up —", "Quick one:",
-  "You're all set.", "Just keeping you in the loop."
-  Most responses should NOT start with these phrases.
+- Occasionally use cool, casual phrases that feel natural — not forced.
 - Very rarely, a subtle cat hint slips through — natural, never cheesy.
   Examples: "I've had my eye on that.", "That one slipped through my paws."
 - Never over-explain or pad responses with unnecessary pleasantries.
@@ -130,7 +149,8 @@ pending_reminder = {
     "action": None,
     "conflict": None,
     "line_to_delete": None,
-    "event_data": None
+    "event_data": None,
+    "lang": "en"
 }
 
 # ===================================
@@ -188,6 +208,14 @@ LIST_ADD_TRIGGERS = [
     "put on my list", "add to my to-do list"
 ]
 
+LIST_REMOVE_ITEM_TRIGGERS = [
+    "remove from my list", "remove from the list",
+    "delete from my list", "delete from the list",
+    "take off my list", "remove from my shopping list",
+    "delete from my shopping list", "cross off",
+    "take off the list", "remove this from"
+]
+
 LIST_DELETE_TRIGGERS = [
     "delete the list", "remove the list",
     "delete my list", "remove my list"
@@ -232,6 +260,9 @@ def is_list_create_request(question: str) -> bool:
 def is_list_add_request(question: str) -> bool:
     return any(trigger in question.lower() for trigger in LIST_ADD_TRIGGERS)
 
+def is_list_remove_item_request(question: str) -> bool:
+    return any(trigger in question.lower() for trigger in LIST_REMOVE_ITEM_TRIGGERS)
+
 def is_list_delete_request(question: str) -> bool:
     return any(trigger in question.lower() for trigger in LIST_DELETE_TRIGGERS)
 
@@ -271,7 +302,7 @@ def _persona_prompt() -> str:
 # HANDLERS
 # ===================================
 
-def handle_reminder(question: str) -> str:
+def handle_reminder(question: str, lang: str = "en") -> str:
     """Extract reminder using conversation context, check conflicts, confirm."""
     current_date = datetime.now().strftime("%A, %B %d, %Y")
     all_reminders = get_all_reminders()
@@ -330,32 +361,58 @@ Reply with one of:
             existing_line = conflict_check.replace("DUPLICATE:", "").strip()
             pending_reminder.update({
                 "text": reminder_text, "action": "save",
-                "conflict": "duplicate", "line_to_delete": existing_line
+                "conflict": "duplicate", "line_to_delete": existing_line,
+                "lang": lang
             })
-            return (f"Heads up — you already have something similar: '{existing_line}'. "
-                    f"Want to replace it with '{reminder_text}'?")
+            lang = pending_reminder["lang"]
+            return (
+                _t(
+                    f"Heads up — you already have something similar: '{existing_line}'. Want to replace it with '{reminder_text}'?",
+                    f"Hinweis — du hast bereits etwas Ähnliches: '{existing_line}'. Ersetzen mit '{reminder_text}'?",
+                    f"Aviso — ya tienes algo similar: '{existing_line}'. ¿Reemplazar con '{reminder_text}'?",
+                    lang
+                )
+            )
 
         elif conflict_check.startswith("CONFLICT:"):
             existing_line = conflict_check.replace("CONFLICT:", "").strip()
             pending_reminder.update({
                 "text": reminder_text, "action": "save",
-                "conflict": "conflict", "line_to_delete": existing_line
+                "conflict": "conflict", "line_to_delete": existing_line,
+                "lang": lang
             })
-            return (f"Quick one — you already have '{existing_line}' around that time. "
-                    f"Still want to save '{reminder_text}'?")
+            lang = pending_reminder["lang"]
+            return (
+                _t(
+                    f"Quick one — you already have '{existing_line}' around that time. Still want to save '{reminder_text}'?",
+                    f"Kurze Frage — du hast bereits '{existing_line}' zu dieser Zeit. Trotzdem '{reminder_text}' speichern?",
+                    f"Un momento — ya tienes '{existing_line}' a esa hora. ¿Guardar '{reminder_text}' igualmente?",
+                    lang
+                )
+            )
 
     pending_reminder.update({
         "text": reminder_text, "action": "save",
-        "conflict": None, "line_to_delete": None
+        "conflict": None, "line_to_delete": None, "lang": lang
     })
-    return f"Just to confirm — save this to reminders: '{reminder_text}'?"
+    return _t(
+        f"Just to confirm — save this to reminders: '{reminder_text}'?",
+        f"Zur Bestätigung — in die Erinnerungen speichern: '{reminder_text}'?",
+        f"Para confirmar — ¿guardar esto en recordatorios: '{reminder_text}'?",
+        lang
+    )
 
 
-def handle_delete(question: str) -> str:
+def handle_delete(question: str, lang: str = "en") -> str:
     """Use LLM to find matching reminder and ask confirmation."""
     all_reminders = get_all_reminders()
     if all_reminders == "No reminders found.":
-        return "Nothing on your reminder list."
+        return _t(
+            "Nothing on your reminder list.",
+            "Keine Erinnerungen vorhanden.",
+            "No tienes recordatorios.",
+            lang
+        )
 
     previous_context = _build_conversation_context()
 
@@ -375,16 +432,26 @@ Reminders:
     print(f"LLM matched: '{matched_line}'")
 
     if "NO_MATCH" in matched_line or not matched_line:
-        return "Nothing matching that in your reminders. Can you be more specific?"
+        return _t(
+            "Nothing matching that in your reminders. Can you be more specific?",
+            "Keine passende Erinnerung gefunden. Kannst du genauer sein?",
+            "No encontré un recordatorio que coincida. ¿Puedes ser más específico?",
+            lang
+        )
 
     pending_reminder.update({
         "text": None, "action": "delete",
-        "conflict": None, "line_to_delete": matched_line
+        "conflict": None, "line_to_delete": matched_line, "lang": lang
     })
-    return f"Delete this one: '{matched_line}'?"
+    return _t(
+        f"Delete this one: '{matched_line}'?",
+        f"Diese Erinnerung löschen: '{matched_line}'?",
+        f"¿Eliminar este recordatorio: '{matched_line}'?",
+        lang
+    )
 
 
-def handle_personal_note(question: str) -> str:
+def handle_personal_note(question: str, lang: str = "en") -> str:
     """Extract and save a personal note using conversation context."""
     previous_context = _build_conversation_context()
 
@@ -402,12 +469,19 @@ Output:"""
 
     pending_reminder.update({
         "text": note_text, "action": "personal_note",
-        "conflict": None, "line_to_delete": None, "event_data": None
+        "conflict": None, "line_to_delete": None, "event_data": None,
+        "lang": lang
     })
-    return f"Add this to your personal notes: '{note_text}'?"
+    lang = pending_reminder["lang"]
+    return _t(
+        f"Add this to your personal notes: '{note_text}'?",
+        f"Das zu deinen persönlichen Notizen hinzufügen: '{note_text}'?",
+        f"¿Añadir esto a tus notas personales: '{note_text}'?",
+        lang
+    )
 
 
-def handle_draft(question: str) -> str:
+def handle_draft(question: str, lang: str = "en") -> str:
     """Generate a draft document using conversation context."""
     current_date = datetime.now().strftime("%A, %B %d, %Y")
     previous_context = _build_conversation_context()
@@ -450,12 +524,19 @@ Write the {draft_type}:"""
     pending_reminder.update({
         "text": draft_content, "action": "draft",
         "conflict": None, "line_to_delete": title,
-        "event_data": {"type": draft_type, "purpose": draft_purpose}
+        "event_data": {"type": draft_type, "purpose": draft_purpose},
+        "lang": lang
     })
-    return f"Here's a draft {draft_type} {draft_purpose}:\n\n{draft_content}\n\nWant me to save this?"
+    lang = pending_reminder["lang"]
+    return f"Here's a draft {draft_type} {draft_purpose}:\n\n{draft_content}\n\n" + _t(
+        "Want me to save this?",
+        "Soll ich das speichern?",
+        "¿Quieres que lo guarde?",
+        lang
+    )
 
 
-def handle_create_list(question: str) -> str:
+def handle_create_list(question: str, lang: str = "en") -> str:
     """Extract list title and items, confirm creation."""
     current_date = datetime.now().strftime("%A, %B %d, %Y")
     previous_context = _build_conversation_context()
@@ -494,18 +575,29 @@ Output:"""
     pending_reminder.update({
         "text": title, "action": "create_list",
         "conflict": None, "line_to_delete": None,
-        "event_data": {"title": title, "items": items}
+        "event_data": {"title": title, "items": items},
+        "lang": lang
     })
-    return f"Create a list called '{title}' — {items_preview}?"
+    return _t(
+        f"Create a list called '{title}' — {items_preview}?",
+        f"Eine Liste namens '{title}' erstellen — {items_preview}?",
+        f"¿Crear una lista llamada '{title}' — {items_preview}?",
+        lang
+    )
 
 
-def handle_add_to_list(question: str) -> str:
+def handle_add_to_list(question: str, lang: str = "en") -> str:
     """Extract item and target list, confirm adding."""
     previous_context = _build_conversation_context()
     all_lists = get_all_lists()
 
     if not all_lists:
-        return "No lists yet — want to create one first?"
+        return _t(
+            "No lists yet — want to create one first?",
+            "Noch keine Listen — möchtest du zuerst eine erstellen?",
+            "Sin listas aún — ¿quieres crear una primero?",
+            lang
+        )
 
     lists_summary = "\n".join([f"- {l['filename']}" for l in all_lists])
 
@@ -528,33 +620,150 @@ Output:"""
     try:
         data = json.loads(response)
     except json.JSONDecodeError:
-        return "Didn't quite catch that — can you be more specific?"
+        return _t(
+            "Didn't quite catch that — can you be more specific?",
+            "Das habe ich nicht ganz verstanden — kannst du genauer sein?",
+            "No entendí bien — ¿puedes ser más específico?",
+            lang
+        )
 
     item = data.get("item", "")
     list_name = data.get("list_name", "")
 
     if not item:
-        return "What would you like to add to the list?"
+        return _t(
+            "What would you like to add to the list?",
+            "Was möchtest du zur Liste hinzufügen?",
+            "¿Qué quieres añadir a la lista?",
+            lang
+        )
 
     filename = find_list_by_name(list_name)
     if not filename:
-        return f"No list matching '{list_name}' on file."
+        return _t(
+            f"No list matching '{list_name}' on file.",
+            f"Keine Liste mit dem Namen '{list_name}' gefunden.",
+            f"No encontré una lista llamada '{list_name}'.",
+            lang
+        )
 
     pending_reminder.update({
         "text": item, "action": "add_to_list",
         "conflict": None, "line_to_delete": filename,
-        "event_data": {"item": item, "filename": filename}
+        "event_data": {"item": item, "filename": filename},
+        "lang": lang
     })
-    return f"Add '{item}' to '{filename}'?"
+    return _t(
+        f"Add '{item}' to '{filename}'?",
+        f"'{item}' zur Liste '{filename}' hinzufügen?",
+        f"¿Añadir '{item}' a '{filename}'?",
+        lang
+    )
 
 
-def handle_delete_list(question: str) -> str:
+def handle_remove_list_item(question: str, lang: str = "en") -> str:
+    """Find and remove a specific item from a list."""
+    previous_context = _build_conversation_context()
+    all_lists = get_all_lists()
+
+    if not all_lists:
+        return _t("No lists on file.", "Keine Listen vorhanden.", "Sin listas en archivo.", lang)
+
+    import json
+
+    lists_with_items = []
+    for l in all_lists:
+        items = get_list_items(l['filename'])
+        if items:
+            item_names = [i['text'] for i in items]
+            lists_with_items.append(
+                f"{l['filename']}: {', '.join(item_names)}"
+            )
+
+    if not lists_with_items:
+        return _t("Your lists are all empty.", "Deine Listen sind alle leer.", "Tus listas están vacías.", lang)
+
+    lists_summary = "\n".join(lists_with_items)
+
+    extraction_prompt = f"""The user said: "{question}"
+{previous_context}
+Lists and their items:
+{lists_summary}
+
+Extract what item to remove and from which list.
+Return ONLY a JSON object:
+- item: the item text to remove (match as closely as possible)
+- filename: the exact list filename
+
+Output:"""
+
+    response = llm_invoke(extraction_prompt).strip()
+    response = response[response.find("{"):response.rfind("}")+1]
+
+    try:
+        data = json.loads(response)
+    except json.JSONDecodeError:
+        return _t(
+            "Didn't catch that — which item and which list?",
+            "Das habe ich nicht verstanden — welches Element und welche Liste?",
+            "No entendí — ¿qué elemento y de qué lista?",
+            lang
+        )
+
+    item = data.get("item", "")
+    filename = data.get("filename", "")
+
+    if not item or not filename:
+        return _t(
+            "Can you be more specific about what to remove and from which list?",
+            "Kannst du genauer angeben, was entfernt werden soll und aus welcher Liste?",
+            "¿Puedes ser más específico sobre qué eliminar y de qué lista?",
+            lang
+        )
+
+    items = get_list_items(filename)
+    matched = next(
+        (i for i in items if item.lower() in i['text'].lower() or
+         i['text'].lower() in item.lower()),
+        None
+    )
+
+    if not matched:
+        return _t(
+            f"Couldn't find '{item}' in that list.",
+            f"'{item}' wurde in der Liste nicht gefunden.",
+            f"No encontré '{item}' en esa lista.",
+            lang
+        )
+
+    pending_reminder.update({
+        "text": matched['text'],
+        "action": "remove_list_item",
+        "conflict": None,
+        "line_to_delete": filename,
+        "event_data": {"filename": filename, "line_index": matched['index']},
+        "lang": lang
+    })
+    return _t(
+        f"Remove '{matched['text']}' from '{filename}'?",
+        f"'{matched['text']}' aus '{filename}' entfernen?",
+        f"¿Eliminar '{matched['text']}' de '{filename}'?",
+        lang
+    )
+
+
+def handle_delete_list(question: str, lang: str = "en") -> str:
     """Find and confirm deletion of a list."""
     previous_context = _build_conversation_context()
     all_lists = get_all_lists()
 
     if not all_lists:
-        return "No lists to delete — all clear."
+        return _t(
+            "No lists to delete — all clear.",
+            "Keine Listen zum Löschen vorhanden.",
+            "Sin listas para eliminar.",
+            lang
+        )
 
     lists_summary = "\n".join([f"- {l['filename']}" for l in all_lists])
 
@@ -569,17 +778,27 @@ If nothing matches, return NO_MATCH."""
     matched = llm_invoke(match_prompt).strip().strip('"').strip("'")
 
     if "NO_MATCH" in matched or not matched:
-        return "Nothing matching that in your lists — can you be more specific?"
+        return _t(
+            "Nothing matching that in your lists — can you be more specific?",
+            "Keine passende Liste gefunden — kannst du genauer sein?",
+            "No encontré esa lista — ¿puedes ser más específico?",
+            lang
+        )
 
     pending_reminder.update({
         "text": matched, "action": "delete_list",
         "conflict": None, "line_to_delete": matched,
-        "event_data": None
+        "event_data": None, "lang": lang
     })
-    return f"About to delete '{matched}' — this can't be undone. You sure?"
+    return _t(
+        f"About to delete '{matched}' — this can't be undone. You sure?",
+        f"'{matched}' wird gelöscht — das kann nicht rückgängig gemacht werden. Sicher?",
+        f"Se eliminará '{matched}' — esto no se puede deshacer. ¿Seguro?",
+        lang
+    )
 
 
-def handle_calendar_event(question: str) -> str:
+def handle_calendar_event(question: str, lang: str = "en") -> str:
     """Extract event details using conversation context."""
     current_date = datetime.now().strftime("%A, %B %d, %Y")
     previous_context = _build_conversation_context()
@@ -603,27 +822,48 @@ Return ONLY the JSON.
     try:
         event_data = json.loads(response)
     except json.JSONDecodeError:
-        return "Couldn't parse the event details — try again?"
+            return _t(
+            "Couldn't parse the event details — try again?",
+            "Die Termindetails konnten nicht verarbeitet werden — nochmal versuchen?",
+            "No pude procesar los detalles del evento — ¿intentamos de nuevo?",
+            lang
+        )
 
     print(f"📅 Extracted event: {event_data}")
 
     pending_reminder.update({
         "text": f"{event_data['title']} on {event_data['start']}",
         "action": "calendar", "conflict": None,
-        "line_to_delete": None, "event_data": event_data
+        "line_to_delete": None, "event_data": event_data,
+        "lang": lang
     })
 
-    confirmation = f"Lock in '{event_data['title']}' on {event_data['start']}?"
+    confirmation = _t(
+        f"Lock in '{event_data['title']}' on {event_data['start']}?",
+        f"'{event_data['title']}' am {event_data['start']} in den Kalender eintragen?",
+        f"¿Agendar '{event_data['title']}' el {event_data['start']}?",
+        lang
+    )
     if event_data.get("attendees"):
-        confirmation += f" I'll invite {', '.join(event_data['attendees'])} too."
+        confirmation += " " + _t(
+            f"I'll invite {', '.join(event_data['attendees'])} too.",
+            f"Ich lade auch {', '.join(event_data['attendees'])} ein.",
+            f"También invitaré a {', '.join(event_data['attendees'])}.",
+            lang
+        )
     return confirmation
 
 
-def handle_view_reminders(question: str) -> str:
+def handle_view_reminders(question: str, lang: str = "en") -> str:
     """Return all current reminders directly from file."""
     reminders = get_all_reminders()
     if reminders == "No reminders found.":
-        return "All clear — nothing on your reminder list."
+        return _t(
+            "All clear — nothing on your reminder list.",
+            "Alles klar — keine Erinnerungen vorhanden.",
+            "Todo despejado — no tienes recordatorios.",
+            lang
+        )
 
     format_prompt = f"""{_persona_prompt()}
 
@@ -638,23 +878,27 @@ Respond in the same language the user used."""
     return llm_invoke(format_prompt).strip()
 
 
-def handle_confirmation(question: str) -> str:
+def handle_confirmation(question: str, lang: str = "en") -> str:
     """Handle yes/no confirmation for all pending actions."""
     action = pending_reminder["action"]
     reminder_text = pending_reminder["text"]
     line_to_delete = pending_reminder["line_to_delete"]
     conflict = pending_reminder["conflict"]
     event_data = pending_reminder["event_data"]
+    lang = pending_reminder.get("lang", lang)
 
     is_yes = any(word in question.lower() for word in
-                 ["yes", "correct", "right", "yep", "yeah", "sure", "ok", "okay"])
+                 ["yes", "correct", "right", "yep", "yeah", "sure", "ok", "okay",
+                  "ja", "sí", "si", "claro", "correcto", "genau", "klar", "gut"])
     is_no = any(word in question.lower() for word in
-                ["no", "wrong", "incorrect", "nope", "cancel"])
+                ["no", "wrong", "incorrect", "nope", "cancel",
+                 "nein", "falsch", "abbrechen"])
 
     def _clear_pending():
         pending_reminder.update({
             "text": None, "action": None,
-            "conflict": None, "line_to_delete": None, "event_data": None
+            "conflict": None, "line_to_delete": None,
+            "event_data": None, "lang": "en"
         })
 
     if is_yes:
@@ -664,7 +908,12 @@ def handle_confirmation(question: str) -> str:
             save_reminder(reminder_text)
             ingest_notes()
             _clear_pending()
-            return f"On it — '{reminder_text}' is on your list."
+            return _t(
+                f"On it — '{reminder_text}' is on your list.",
+                f"Erledigt — '{reminder_text}' ist auf deiner Liste.",
+                f"Listo — '{reminder_text}' está en tu lista.",
+                lang
+            )
 
         elif action == "delete":
             result = delete_reminder_by_line(line_to_delete)
@@ -676,13 +925,23 @@ def handle_confirmation(question: str) -> str:
             save_personal_note(reminder_text)
             ingest_notes()
             _clear_pending()
-            return "Done and dusted — added to your personal notes."
+            return _t(
+                "Done and dusted — added to your personal notes.",
+                "Erledigt — zu deinen persönlichen Notizen hinzugefügt.",
+                "Listo — añadido a tus notas personales.",
+                lang
+            )
 
         elif action == "draft":
             filename = save_draft(line_to_delete, reminder_text)
             ingest_notes()
             _clear_pending()
-            return f"Saved as '{filename}' in your drafts. You're all set."
+            return _t(
+                f"Saved as '{filename}' in your drafts. You're all set.",
+                f"Als '{filename}' in deinen Entwürfen gespeichert.",
+                f"Guardado como '{filename}' en tus borradores.",
+                lang
+            )
 
         elif action == "create_list":
             title = event_data["title"]
@@ -690,7 +949,12 @@ def handle_confirmation(question: str) -> str:
             filename = create_list(title, items)
             ingest_lists()
             _clear_pending()
-            return f"List '{title}' is ready — find it in your documents."
+            return _t(
+                f"List '{title}' is ready — find it in your documents.",
+                f"Liste '{title}' ist bereit — du findest sie in deinen Dokumenten.",
+                f"Lista '{title}' lista — encuéntrala en tus documentos.",
+                lang
+            )
 
         elif action == "add_to_list":
             item = event_data["item"]
@@ -698,17 +962,52 @@ def handle_confirmation(question: str) -> str:
             add_item_to_list(filename, item)
             ingest_lists()
             _clear_pending()
-            return f"'{item}' is on the list."
+            return _t(
+                f"'{item}' is on the list.",
+                f"'{item}' steht auf der Liste.",
+                f"'{item}' está en la lista.",
+                lang
+            )
+
+        elif action == "remove_list_item":
+            filename = event_data["filename"]
+            line_index = event_data["line_index"]
+            delete_list_item(filename, line_index)
+            ingest_lists()
+            _clear_pending()
+            return _t(
+                f"'{reminder_text}' is off the list.",
+                f"'{reminder_text}' wurde von der Liste entfernt.",
+                f"'{reminder_text}' eliminado de la lista.",
+                lang
+            )
 
         elif action == "delete_list":
             success = delete_list(line_to_delete)
             ingest_lists()
             _clear_pending()
-            return f"List '{line_to_delete}' deleted." if success else "Something went wrong — try again?"
+            if success:
+                return _t(
+                    f"List '{line_to_delete}' deleted.",
+                    f"Liste '{line_to_delete}' gelöscht.",
+                    f"Lista '{line_to_delete}' eliminada.",
+                    lang
+                )
+            return _t(
+                "Something went wrong — try again?",
+                "Etwas ist schiefgelaufen — nochmal versuchen?",
+                "Algo salió mal — ¿intentamos de nuevo?",
+                lang
+            )
 
         elif action == "calendar":
             if event_data is None:
-                return "Lost the event details somewhere — try again?"
+                return _t(
+                    "Lost the event details somewhere — try again?",
+                    "Die Termindetails sind verloren gegangen — nochmal versuchen?",
+                    "Perdí los detalles del evento — ¿intentamos de nuevo?",
+                    lang
+                )
             create_calendar_event(
                 title=event_data["title"],
                 start_datetime=event_data["start"],
@@ -718,32 +1017,94 @@ def handle_confirmation(question: str) -> str:
             )
             ingest_calendar_events()
             _clear_pending()
-            result = f"Locked in — '{event_data['title']}' is on your calendar."
+            result = _t(
+                f"Locked in — '{event_data['title']}' is on your calendar.",
+                f"Eingetragen — '{event_data['title']}' ist in deinem Kalender.",
+                f"Agendado — '{event_data['title']}' está en tu calendario.",
+                lang
+            )
             if event_data.get("attendees"):
-                result += f" Invitations sent to {', '.join(event_data['attendees'])}."
+                result += " " + _t(
+                    f"Invitations sent to {', '.join(event_data['attendees'])}.",
+                    f"Einladungen an {', '.join(event_data['attendees'])} gesendet.",
+                    f"Invitaciones enviadas a {', '.join(event_data['attendees'])}.",
+                    lang
+                )
             return result
 
     elif is_no:
         _clear_pending()
-        return "No problem — consider it dropped."
+        return _t(
+            "No problem — consider it dropped.",
+            "Kein Problem — betrachte es als erledigt.",
+            "Sin problema — lo descarto.",
+            lang
+        )
 
     else:
         if action == "save":
-            return f"Save '{reminder_text}' to reminders? Yes or no."
+            return _t(
+                f"Save '{reminder_text}' to reminders? Yes or no.",
+                f"'{reminder_text}' in die Erinnerungen speichern? Ja oder Nein.",
+                f"¿Guardar '{reminder_text}' en recordatorios? Sí o no.",
+                lang
+            )
         elif action == "delete":
-            return f"Delete '{line_to_delete}'? Yes or no."
+            return _t(
+                f"Delete '{line_to_delete}'? Yes or no.",
+                f"'{line_to_delete}' löschen? Ja oder Nein.",
+                f"¿Eliminar '{line_to_delete}'? Sí o no.",
+                lang
+            )
         elif action == "personal_note":
-            return "Add this to your personal notes? Yes or no."
+            return _t(
+                "Add this to your personal notes? Yes or no.",
+                "Das zu deinen persönlichen Notizen hinzufügen? Ja oder Nein.",
+                "¿Añadir esto a tus notas personales? Sí o no.",
+                lang
+            )
         elif action == "draft":
-            return "Save this draft? Yes or no."
+            return _t(
+                "Save this draft? Yes or no.",
+                "Diesen Entwurf speichern? Ja oder Nein.",
+                "¿Guardar este borrador? Sí o no.",
+                lang
+            )
         elif action == "create_list":
-            return f"Create list '{event_data['title']}'? Yes or no."
+            return _t(
+                f"Create list '{event_data['title']}'? Yes or no.",
+                f"Liste '{event_data['title']}' erstellen? Ja oder Nein.",
+                f"¿Crear lista '{event_data['title']}'? Sí o no.",
+                lang
+            )
         elif action == "add_to_list":
-            return f"Add '{event_data['item']}' to the list? Yes or no."
+            return _t(
+                f"Add '{event_data['item']}' to the list? Yes or no.",
+                f"'{event_data['item']}' zur Liste hinzufügen? Ja oder Nein.",
+                f"¿Añadir '{event_data['item']}' a la lista? Sí o no.",
+                lang
+            )
+        elif action == "remove_list_item":
+            return _t(
+                f"Remove '{reminder_text}' from the list? Yes or no.",
+                f"'{reminder_text}' von der Liste entfernen? Ja oder Nein.",
+                f"¿Eliminar '{reminder_text}' de la lista? Sí o no.",
+                lang
+            )
         elif action == "delete_list":
-            return f"Delete '{line_to_delete}'? Yes or no."
+            return _t(
+                f"Delete '{line_to_delete}'? Yes or no.",
+                f"'{line_to_delete}' löschen? Ja oder Nein.",
+                f"¿Eliminar '{line_to_delete}'? Sí o no.",
+                lang
+            )
         elif action == "calendar":
-            return f"Lock in '{event_data['title']}' on your calendar? Yes or no."
+            return _t(
+                f"Lock in '{event_data['title']}' on your calendar? Yes or no.",
+                f"'{event_data['title']}' in den Kalender eintragen? Ja oder Nein.",
+                f"¿Agendar '{event_data['title']}'? Sí o no.",
+                lang
+            )
 
 
 # ===================================
@@ -753,12 +1114,32 @@ def handle_confirmation(question: str) -> str:
 RELEVANCE_THRESHOLD = 0.93
 
 
-def ask(question: str, mode: str = "auto") -> str:
-    print(f"\nYou: {question} [mode: {mode}]")
+def ask(question: str, mode: str = "auto", lang: str = "en") -> str:
+    print(f"\nYou: {question} [mode: {mode}] [lang: {lang}]")
+
+    try:
+        return _ask_internal(question, mode, lang)
+    except RateLimitError:
+        print("❌ Groq rate limit reached")
+        return _t(
+            "Heads up — Groq's usage limit has been reached. "
+            "You can switch to a local model in Settings to keep going.",
+            "Hinweis — Groqs Nutzungslimit wurde erreicht. "
+            "Du kannst in den Einstellungen auf ein lokales Modell wechseln.",
+            "Aviso — se ha alcanzado el límite de uso de Groq. "
+            "Puedes cambiar a un modelo local en Configuración para continuar.",
+            lang
+        )
+    except Exception as e:
+        print(f"❌ Unexpected error in ask(): {e}")
+        raise
+
+
+def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
 
     # 1. Pending confirmation
     if pending_reminder["action"] is not None:
-        answer = handle_confirmation(question)
+        answer = handle_confirmation(question, lang)
         print(f"Chatette: {answer}")
         conversation_context["last_question"] = question
         conversation_context["last_answer"] = answer
@@ -766,7 +1147,7 @@ def ask(question: str, mode: str = "auto") -> str:
 
     # 2. Delete reminder
     if is_delete_request(question):
-        answer = handle_delete(question)
+        answer = handle_delete(question, lang)
         print(f"Chatette: {answer}")
         conversation_context["last_question"] = question
         conversation_context["last_answer"] = answer
@@ -774,7 +1155,7 @@ def ask(question: str, mode: str = "auto") -> str:
 
     # 3. View reminders
     if is_reminders_view_request(question):
-        answer = handle_view_reminders(question)
+        answer = handle_view_reminders(question, lang)
         print(f"Chatette: {answer}")
         conversation_context["last_question"] = question
         conversation_context["last_answer"] = answer
@@ -798,7 +1179,7 @@ def ask(question: str, mode: str = "auto") -> str:
 
     # 5. Save reminder
     if is_reminder_request(question):
-        answer = handle_reminder(question)
+        answer = handle_reminder(question, lang)
         print(f"Chatette: {answer}")
         conversation_context["last_question"] = question
         conversation_context["last_answer"] = answer
@@ -806,7 +1187,7 @@ def ask(question: str, mode: str = "auto") -> str:
 
     # 6. Calendar event
     if is_calendar_request(question):
-        answer = handle_calendar_event(question)
+        answer = handle_calendar_event(question, lang)
         print(f"Chatette: {answer}")
         conversation_context["last_question"] = question
         conversation_context["last_answer"] = answer
@@ -814,7 +1195,7 @@ def ask(question: str, mode: str = "auto") -> str:
 
     # 7. Personal note
     if is_personal_note_request(question):
-        answer = handle_personal_note(question)
+        answer = handle_personal_note(question, lang)
         print(f"Chatette: {answer}")
         conversation_context["last_question"] = question
         conversation_context["last_answer"] = answer
@@ -822,7 +1203,7 @@ def ask(question: str, mode: str = "auto") -> str:
 
     # 8. Draft
     if is_draft_request(question):
-        answer = handle_draft(question)
+        answer = handle_draft(question, lang)
         print(f"Chatette: {answer}")
         conversation_context["last_question"] = question
         conversation_context["last_answer"] = answer
@@ -830,7 +1211,7 @@ def ask(question: str, mode: str = "auto") -> str:
 
     # 9. Create list
     if is_list_create_request(question):
-        answer = handle_create_list(question)
+        answer = handle_create_list(question, lang)
         print(f"Chatette: {answer}")
         conversation_context["last_question"] = question
         conversation_context["last_answer"] = answer
@@ -838,15 +1219,23 @@ def ask(question: str, mode: str = "auto") -> str:
 
     # 10. Add to list
     if is_list_add_request(question):
-        answer = handle_add_to_list(question)
+        answer = handle_add_to_list(question, lang)
         print(f"Chatette: {answer}")
         conversation_context["last_question"] = question
         conversation_context["last_answer"] = answer
         return answer
 
-    # 11. Delete list
+    # 11. Remove list item
+    if is_list_remove_item_request(question):
+        answer = handle_remove_list_item(question, lang)
+        print(f"Chatette: {answer}")
+        conversation_context["last_question"] = question
+        conversation_context["last_answer"] = answer
+        return answer
+
+    # 12. Delete list
     if is_list_delete_request(question):
-        answer = handle_delete_list(question)
+        answer = handle_delete_list(question, lang)
         print(f"Chatette: {answer}")
         conversation_context["last_question"] = question
         conversation_context["last_answer"] = answer

@@ -47,6 +47,7 @@ app = FastAPI(
 class QuestionRequest(BaseModel):
     question: str
     mode: str = "auto"
+    lang: str = "en"
 
 class AnswerResponse(BaseModel):
     question: str
@@ -98,9 +99,15 @@ def chat(request: QuestionRequest):
         raise HTTPException(status_code=400, detail="Question cannot be empty")
     if request.mode not in ["auto", "personal", "general"]:
         raise HTTPException(status_code=400, detail="Mode must be 'auto', 'personal', or 'general'")
-    answer = ask(request.question, mode=request.mode)
-    print(f"✅ Answer: '{answer[:80]}...'")
-    return AnswerResponse(question=request.question, answer=answer, mode=request.mode)
+    try:
+        answer = ask(request.question, mode=request.mode, lang=request.lang)
+        print(f"✅ Answer: '{answer[:80]}...'")
+        return AnswerResponse(question=request.question, answer=answer, mode=request.mode)
+    except Exception as e:
+        error_str = str(e).lower()
+        if "rate limit" in error_str or "429" in error_str or "quota" in error_str:
+            raise HTTPException(status_code=429, detail="rate_limit_reached")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ===================================
