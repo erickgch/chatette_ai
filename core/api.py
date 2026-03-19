@@ -385,10 +385,11 @@ def save_settings(request: SettingsRequest):
         raise HTTPException(status_code=500, detail="Failed to save settings")
 
     def _restart():
-        import time, sys
-        time.sleep(1.5)
+        import time, sys, subprocess
+        time.sleep(3)  # Give the old process time to shut down cleanly
         print("🔄 Restarting Chatette with new settings...")
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        subprocess.Popen([sys.executable] + sys.argv)
+        sys.exit(0)
 
     threading.Thread(target=_restart, daemon=True).start()
     return {"status": "saved", "restarting": True}

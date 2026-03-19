@@ -97,7 +97,7 @@ Write a short, uplifting message for {user_name}.
 Rules:
 - 1-2 sentences maximum
 - Start with a {time_label} opener like "{greeting}"
-- Something about health, positivity, or enjoying the moment
+- Something about health or enjoying the moment
 - Casual and genuine — not motivational poster energy
 
 Write the message now:"""
@@ -136,7 +136,7 @@ def start_scheduler():
     print(f"📁 Watching notes folder: {NOTES_PATH}")
 
     # Schedule Google sync every 30 minutes
-    schedule.every(30).minutes.do(sync_all)
+    schedule.every(15).minutes.do(sync_all)
 
     # Generate notifications cache daily at 8am
     schedule.every().day.at("08:00").do(generate_notifications_cache)

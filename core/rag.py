@@ -11,10 +11,9 @@ from note_manager import (
     get_all_lists, delete_list, get_list_items, delete_list_item
 )
 from datetime import datetime, timedelta
-from google_integration import create_calendar_event
-from pathlib import Path
+from google_integration import create_calendar_event, delete_calendar_event, get_upcoming_events
 
-load_dotenv(Path(__file__).parent.parent / ".env")
+load_dotenv()
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL")
@@ -56,11 +55,20 @@ else:
 
 def llm_invoke(prompt: str) -> str:
     """Invoke LLM and always return a plain string."""
+    import re
     try:
-        response = llm.invoke(prompt)
-        if hasattr(response, 'content'):
-            return response.content
-        return str(response)
+        # For Qwen3 models, disable chain-of-thought thinking
+        # (/no_think appended to prompt suppresses <think> blocks)
+        _prompt = prompt
+        if USE_GROQ and "qwen" in GROQ_MODEL.lower():
+            _prompt = prompt + " /no_think"
+
+        response = llm.invoke(_prompt)
+        text = response.content if hasattr(response, 'content') else str(response)
+
+        # Strip any <think>...</think> blocks just in case
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+        return text
     except Exception as e:
         error_str = str(e).lower()
         if "rate limit" in error_str or "429" in error_str or "too many" in error_str or "quota" in error_str:
@@ -165,11 +173,18 @@ REMINDER_TRIGGERS = [
     "save that", "note this", "note down"
 ]
 
-DELETE_TRIGGERS = [
+DELETE_REMINDER_TRIGGERS = [
     "delete the reminder", "remove the reminder",
     "cancel the reminder", "delete the note",
     "remove the note", "forget about",
-    "remove the event", "delete the event"
+]
+
+DELETE_EVENT_TRIGGERS = [
+    "remove the event", "delete the event",
+    "cancel the event", "remove from my calendar",
+    "delete from my calendar", "cancel my appointment",
+    "cancel my meeting",
+    "please remove from my calendar", "please delete from my calendar",
 ]
 
 CALENDAR_TRIGGERS = [
@@ -240,38 +255,55 @@ REMINDERS_VIEW_TRIGGERS = [
 # INTENT DETECTION
 # ===================================
 
-def is_reminder_request(question: str) -> bool:
-    return any(trigger in question.lower() for trigger in REMINDER_TRIGGERS)
+def _starts_with_any(question: str, triggers: list) -> bool:
+    """Check if question starts with any trigger phrase."""
+    q = question.lower().strip()
+    return any(q.startswith(trigger) for trigger in triggers)
 
-def is_delete_request(question: str) -> bool:
-    return any(trigger in question.lower() for trigger in DELETE_TRIGGERS)
+def _contains_any(question: str, triggers: list) -> bool:
+    """Check if question contains any trigger phrase anywhere."""
+    q = question.lower()
+    return any(trigger in q for trigger in triggers)
+
+
+# Action triggers — startswith only (avoids false positives)
+def is_reminder_request(question: str) -> bool:
+    return _starts_with_any(question, REMINDER_TRIGGERS)
+
+def is_delete_reminder_request(question: str) -> bool:
+    return _starts_with_any(question, DELETE_REMINDER_TRIGGERS)
+
+def is_delete_event_request(question: str) -> bool:
+    return _starts_with_any(question, DELETE_EVENT_TRIGGERS)
 
 def is_calendar_request(question: str) -> bool:
-    return any(trigger in question.lower() for trigger in CALENDAR_TRIGGERS)
+    return _starts_with_any(question, CALENDAR_TRIGGERS)
 
 def is_personal_note_request(question: str) -> bool:
-    return any(trigger in question.lower() for trigger in PERSONAL_NOTE_TRIGGERS)
+    return _starts_with_any(question, PERSONAL_NOTE_TRIGGERS)
 
 def is_draft_request(question: str) -> bool:
-    return any(trigger in question.lower() for trigger in DRAFT_TRIGGERS)
+    return _starts_with_any(question, DRAFT_TRIGGERS)
 
 def is_list_create_request(question: str) -> bool:
-    return any(trigger in question.lower() for trigger in LIST_CREATE_TRIGGERS)
+    return _starts_with_any(question, LIST_CREATE_TRIGGERS)
 
 def is_list_add_request(question: str) -> bool:
-    return any(trigger in question.lower() for trigger in LIST_ADD_TRIGGERS)
+    return _starts_with_any(question, LIST_ADD_TRIGGERS)
 
 def is_list_remove_item_request(question: str) -> bool:
-    return any(trigger in question.lower() for trigger in LIST_REMOVE_ITEM_TRIGGERS)
+    return _starts_with_any(question, LIST_REMOVE_ITEM_TRIGGERS)
 
 def is_list_delete_request(question: str) -> bool:
-    return any(trigger in question.lower() for trigger in LIST_DELETE_TRIGGERS)
+    return _starts_with_any(question, LIST_DELETE_TRIGGERS)
 
+
+# Query triggers — contains (questions, not commands)
 def is_about_chatette(question: str) -> bool:
-    return any(trigger in question.lower() for trigger in CHATETTE_TRIGGERS)
+    return _contains_any(question, CHATETTE_TRIGGERS)
 
 def is_reminders_view_request(question: str) -> bool:
-    return any(trigger in question.lower() for trigger in REMINDERS_VIEW_TRIGGERS)
+    return _contains_any(question, REMINDERS_VIEW_TRIGGERS)
 
 
 # ===================================
@@ -448,6 +480,84 @@ Reminders:
         f"Delete this one: '{matched_line}'?",
         f"Diese Erinnerung löschen: '{matched_line}'?",
         f"¿Eliminar este recordatorio: '{matched_line}'?",
+        lang
+    )
+
+
+def handle_delete_event(question: str, lang: str = "en") -> str:
+    """Use LLM to find matching calendar event and ask confirmation."""
+    current_date = datetime.now().strftime("%A, %B %d, %Y")
+    previous_context = _build_conversation_context()
+
+    # Fetch upcoming events from Google Calendar
+    try:
+        events = get_upcoming_events(days_ahead=60, days_behind=1)
+    except Exception as e:
+        print(f"Could not fetch events: {e}")
+        return _t(
+            "I couldn't connect to your Google Calendar. Is the server online?",
+            "Ich konnte keine Verbindung zu deinem Google Kalender herstellen.",
+            "No pude conectarme a tu Google Calendar. ¿Está el servidor activo?",
+            lang
+        )
+
+    if not events:
+        return _t(
+            "No upcoming events found in your calendar.",
+            "Keine bevorstehenden Termine in deinem Kalender gefunden.",
+            "No encontré eventos próximos en tu calendario.",
+            lang
+        )
+
+    # Build a summary of events for the LLM to match against
+    events_summary = "\n".join([
+        f"- ID: {e['id']} | {e['title']} on {e['start']}"
+        for e in events
+        if 'id' in e
+    ])
+
+    match_prompt = f"""Today is {current_date}.
+{previous_context}
+The user wants to delete a calendar event: "{question}"
+
+Upcoming events:
+{events_summary}
+
+Instructions:
+- Find the event that best matches what the user wants to delete
+- If the user says "that" or "it", use the previous exchange
+- Return ONLY the event ID and title in this exact format: ID|Title
+- If nothing matches clearly, return NO_MATCH
+
+Your answer:"""
+
+    matched = llm_invoke(match_prompt).strip().strip('"').strip("'")
+    print(f"LLM matched event: '{matched}'")
+
+    if "NO_MATCH" in matched or not matched or "|" not in matched:
+        return _t(
+            "Couldn't find that event. Can you be more specific?",
+            "Ich konnte diesen Termin nicht finden. Kannst du genauer sein?",
+            "No encontré ese evento. ¿Puedes ser más específico?",
+            lang
+        )
+
+    parts = matched.split("|", 1)
+    event_id = parts[0].strip()
+    event_title = parts[1].strip() if len(parts) > 1 else event_id
+
+    pending_reminder.update({
+        "text": event_title,
+        "action": "delete_event",
+        "conflict": None,
+        "line_to_delete": event_id,
+        "event_data": {"id": event_id, "title": event_title},
+        "lang": lang
+    })
+    return _t(
+        f"Delete '{event_title}' from your Google Calendar?",
+        f"'{event_title}' aus deinem Google Kalender löschen?",
+        f"¿Eliminar '{event_title}' de tu Google Calendar?",
         lang
     )
 
@@ -1033,6 +1143,34 @@ def handle_confirmation(question: str, lang: str = "en") -> str:
                 )
             return result
 
+        elif action == "delete_event":
+            if event_data is None:
+                return _t(
+                    "Lost the event details — try again?",
+                    "Die Termindetails sind verloren gegangen — nochmal versuchen?",
+                    "Perdí los detalles del evento — ¿intentamos de nuevo?",
+                    lang
+                )
+            try:
+                delete_calendar_event(event_data["id"])
+                ingest_calendar_events()
+                _clear_pending()
+                return _t(
+                    f"Done — '{event_data['title']}' has been removed from your calendar.",
+                    f"Erledigt — '{event_data['title']}' wurde aus deinem Kalender entfernt.",
+                    f"Listo — '{event_data['title']}' fue eliminado de tu calendario.",
+                    lang
+                )
+            except Exception as e:
+                _clear_pending()
+                print(f"Failed to delete event: {e}")
+                return _t(
+                    "Something went wrong deleting the event — try again?",
+                    "Beim Löschen des Termins ist etwas schiefgelaufen — nochmal versuchen?",
+                    "Algo salió mal al eliminar el evento — ¿intentamos de nuevo?",
+                    lang
+                )
+
     elif is_no:
         _clear_pending()
         return _t(
@@ -1106,6 +1244,13 @@ def handle_confirmation(question: str, lang: str = "en") -> str:
                 f"¿Agendar '{event_data['title']}'? Sí o no.",
                 lang
             )
+        elif action == "delete_event":
+            return _t(
+                f"Delete '{event_data['title']}' from your calendar? Yes or no.",
+                f"'{event_data['title']}' aus dem Kalender löschen? Ja oder Nein.",
+                f"¿Eliminar '{event_data['title']}' del calendario? Sí o no.",
+                lang
+            )
 
 
 # ===================================
@@ -1147,14 +1292,22 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
         return answer
 
     # 2. Delete reminder
-    if is_delete_request(question):
+    if is_delete_reminder_request(question):
         answer = handle_delete(question, lang)
         print(f"Chatette: {answer}")
         conversation_context["last_question"] = question
         conversation_context["last_answer"] = answer
         return answer
 
-    # 3. View reminders
+    # 3. Delete calendar event
+    if is_delete_event_request(question):
+        answer = handle_delete_event(question, lang)
+        print(f"Chatette: {answer}")
+        conversation_context["last_question"] = question
+        conversation_context["last_answer"] = answer
+        return answer
+
+    # 5. View reminders
     if is_reminders_view_request(question):
         answer = handle_view_reminders(question, lang)
         print(f"Chatette: {answer}")
@@ -1162,7 +1315,7 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
         conversation_context["last_answer"] = answer
         return answer
 
-    # 4. About Chatette
+    # 6. About Chatette
     if is_about_chatette(question):
         about_prompt = (
             f"{_persona_prompt()}\n\n"
@@ -1178,7 +1331,7 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
         conversation_context["last_answer"] = answer
         return answer
 
-    # 5. Save reminder
+    # 7. Save reminder
     if is_reminder_request(question):
         answer = handle_reminder(question, lang)
         print(f"Chatette: {answer}")
@@ -1186,7 +1339,7 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
         conversation_context["last_answer"] = answer
         return answer
 
-    # 6. Calendar event
+    # 8. Calendar event
     if is_calendar_request(question):
         answer = handle_calendar_event(question, lang)
         print(f"Chatette: {answer}")
@@ -1194,7 +1347,7 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
         conversation_context["last_answer"] = answer
         return answer
 
-    # 7. Personal note
+    # 9. Personal note
     if is_personal_note_request(question):
         answer = handle_personal_note(question, lang)
         print(f"Chatette: {answer}")
@@ -1202,7 +1355,7 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
         conversation_context["last_answer"] = answer
         return answer
 
-    # 8. Draft
+    # 10. Draft
     if is_draft_request(question):
         answer = handle_draft(question, lang)
         print(f"Chatette: {answer}")
@@ -1210,7 +1363,7 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
         conversation_context["last_answer"] = answer
         return answer
 
-    # 9. Create list
+    # 11. Create list
     if is_list_create_request(question):
         answer = handle_create_list(question, lang)
         print(f"Chatette: {answer}")
@@ -1218,7 +1371,7 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
         conversation_context["last_answer"] = answer
         return answer
 
-    # 10. Add to list
+    # 12. Add to list
     if is_list_add_request(question):
         answer = handle_add_to_list(question, lang)
         print(f"Chatette: {answer}")
@@ -1226,7 +1379,7 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
         conversation_context["last_answer"] = answer
         return answer
 
-    # 11. Remove list item
+    # 13. Remove list item
     if is_list_remove_item_request(question):
         answer = handle_remove_list_item(question, lang)
         print(f"Chatette: {answer}")
@@ -1234,7 +1387,7 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
         conversation_context["last_answer"] = answer
         return answer
 
-    # 12. Delete list
+    # 14. Delete list
     if is_list_delete_request(question):
         answer = handle_delete_list(question, lang)
         print(f"Chatette: {answer}")

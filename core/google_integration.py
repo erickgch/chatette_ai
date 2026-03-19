@@ -16,7 +16,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 # Google API scopes
 # ========================
 SCOPES = [
-    "https://www.googleapis.com/auth/calendar",  # read + write (replaces readonly)
+    "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/gmail.readonly"
 ]
 
@@ -57,7 +57,7 @@ def get_google_credentials():
 # ========================
 # Calendar
 # ========================
-#CHECK EVENTS
+
 def get_upcoming_events(days_ahead: int = None, days_behind: int = None) -> list:
     """Fetch calendar events within a time window."""
 
@@ -75,8 +75,6 @@ def get_upcoming_events(days_ahead: int = None, days_behind: int = None) -> list
     time_min = (now - datetime.timedelta(days=days_behind)).isoformat()
     time_max = (now + datetime.timedelta(days=days_ahead)).isoformat()
 
-    #print(f"📅 Fetching calendar events ({days_behind} days back, {days_ahead} ahead)...")
-
     events_result = service.events().list(
         calendarId="primary",
         timeMin=time_min,
@@ -90,11 +88,11 @@ def get_upcoming_events(days_ahead: int = None, days_behind: int = None) -> list
     formatted_events = []
 
     for event in events:
-
         start = event["start"].get("dateTime", event["start"].get("date"))
         end = event["end"].get("dateTime", event["end"].get("date"))
 
         formatted_events.append({
+            "id": event.get("id", ""),
             "title": event.get("summary", "No title"),
             "start": start,
             "end": end,
@@ -102,11 +100,9 @@ def get_upcoming_events(days_ahead: int = None, days_behind: int = None) -> list
             "location": event.get("location", "")
         })
 
-    #print(f"✅ Found {len(formatted_events)} events")
-
     return formatted_events
 
-#CREATE EVENT
+
 def create_calendar_event(title: str, start_datetime: str, end_datetime: str = None,
                           description: str = "", attendees: list = None) -> str:
     """Create a new event in Google Calendar."""
@@ -119,7 +115,6 @@ def create_calendar_event(title: str, start_datetime: str, end_datetime: str = N
         end_dt = start_dt + timedelta(hours=1)
         end_datetime = end_dt.isoformat()
 
-    # Add Chatette signature to description
     signature = "\n\n---\nEvent created by AI Assistant Chatette"
     full_description = description + signature if description else signature.strip()
 
@@ -149,14 +144,27 @@ def create_calendar_event(title: str, start_datetime: str, end_datetime: str = N
     print(f"✅ Event created: {created_event.get('htmlLink')}")
     return created_event.get("id")
 
+
+def delete_calendar_event(event_id: str):
+    """Delete an event from Google Calendar by its ID."""
+    creds = get_google_credentials()
+    service = build("calendar", "v3", credentials=creds)
+    service.events().delete(
+        calendarId="primary",
+        eventId=event_id
+    ).execute()
+    print(f"✅ Event deleted: {event_id}")
+
+
 # ========================
 # Gmail
 # ========================
 def _clean_email_body(body: str) -> str:
     """Remove URLs and excessive whitespace from email body."""
-    body = re.sub(r'http\S+', '', body)  # remove URLs
-    body = re.sub(r'\s+', ' ', body)     # collapse whitespace
+    body = re.sub(r'http\S+', '', body)
+    body = re.sub(r'\s+', ' ', body)
     return body.strip()[:400]
+
 
 def get_recent_emails(max_results: int = 10, days_window: int = None) -> list:
     """Fetch recent emails within time window."""
@@ -174,8 +182,6 @@ def get_recent_emails(max_results: int = 10, days_window: int = None) -> list:
 
     after_timestamp = int(after_date.timestamp())
 
-    #print(f"📧 Fetching last {max_results} emails (last {EMAIL_DAYS_WINDOW} days)...")
-
     results = service.users().messages().list(
         userId="me",
         maxResults=max_results,
@@ -188,7 +194,6 @@ def get_recent_emails(max_results: int = 10, days_window: int = None) -> list:
     formatted_emails = []
 
     for msg in messages:
-
         msg_detail = service.users().messages().get(
             userId="me",
             id=msg["id"],
@@ -205,21 +210,15 @@ def get_recent_emails(max_results: int = 10, days_window: int = None) -> list:
         payload = msg_detail["payload"]
 
         if "parts" in payload:
-
             for part in payload["parts"]:
-
                 if part["mimeType"] == "text/plain":
-
                     data = part["body"].get("data")
-
                     if data:
                         body = base64.urlsafe_b64decode(data).decode(
                             "utf-8",
                             errors="ignore"
                         )
                         break
-
-
         elif "body" in payload:
             data = payload["body"].get("data")
             if data:
@@ -227,22 +226,22 @@ def get_recent_emails(max_results: int = 10, days_window: int = None) -> list:
                     "utf-8",
                     errors="ignore"
                 )
-        body = _clean_email_body(body) if body else "No body content"  # ← fixed
+
+        body = _clean_email_body(body) if body else "No body content"
         formatted_emails.append({
             "subject": subject,
             "from": sender,
             "date": date,
             "body": body
         })
-    #print(f"✅ Found {len(formatted_emails)} emails")
 
     return formatted_emails
+
 
 # ========================
 # Test
 # ========================
 if __name__ == "__main__":
-
     print("Testing Google integration...\n")
 
     events = get_upcoming_events()
