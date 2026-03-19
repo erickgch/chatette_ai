@@ -163,7 +163,7 @@ Open `.env` and fill in:
 
 ```env
 USER_NAME=YourFirstName
-USER_PROFILE=I live in Berlin. I work as an engineer. I enjoy hiking.
+USER_PROFILE=I live in _____. I work as _____. I enjoy _____.
 GROQ_API_KEY=your_groq_api_key_here
 GOOGLE_CREDENTIALS_FILE=credentials.json
 GOOGLE_TOKEN_FILE=token.pickle
