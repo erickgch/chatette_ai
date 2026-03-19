@@ -1,8 +1,0 @@
-# List of Friends
-<!-- created: 2026-03-17T11:06:19.959580 -->
-Created on: Tuesday, 17 March 2026 at 11:06
-
-- [x] Hugo
-- [x] Paco
-- [ ] Luis
-- [ ] Juanita

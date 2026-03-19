@@ -1,7 +1,0 @@
-# shopping list
-<!-- created: 2026-03-18T11:22:55.670823 -->
-Created on: Wednesday, 18 March 2026 at 11:22
-
-- [x] Salt
-- [x] Yogurt
-- [ ] Beer

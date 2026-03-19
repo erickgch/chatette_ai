@@ -2,12 +2,7 @@
 <project version="4">
   <component name="ChangeListManager">
     <list default="true" id="29976754-2f8a-4065-b0d9-c9dd5eb49e35" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/.env" beforeDir="false" afterPath="$PROJECT_DIR$/.env" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/api.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/api.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/rag.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/rag.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/data/notes/lists/cats.txt" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/data/notes/notifications_cache.json" beforeDir="false" afterPath="$PROJECT_DIR$/data/notes/notifications_cache.json" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -32,30 +27,30 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "ModuleVcsDetector.initialDetectionPerformed": "true",
-    "Python.api.executor": "Run",
-    "Python.chat.executor": "Run",
-    "Python.google_integration.executor": "Run",
-    "Python.ingestion.executor": "Run",
-    "Python.note_manager.executor": "Run",
-    "Python.rag.executor": "Run",
-    "Python.scheduler.executor": "Run",
-    "Python.settings_manager.executor": "Run",
-    "Python.sync_manager.executor": "Run",
-    "Python.testing_ground.executor": "Run",
-    "Python.voice.executor": "Run",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
-    "RunOnceActivity.git.unshallow": "true",
-    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
-    "ai.playground.ignore.import.keys.banner.in.settings": "true",
-    "git-widget-placeholder": "master",
-    "nodejs_package_manager_path": "npm",
-    "vue.rearranger.settings.migration": "true"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;Python.api.executor&quot;: &quot;Run&quot;,
+    &quot;Python.chat.executor&quot;: &quot;Run&quot;,
+    &quot;Python.google_integration.executor&quot;: &quot;Run&quot;,
+    &quot;Python.ingestion.executor&quot;: &quot;Run&quot;,
+    &quot;Python.note_manager.executor&quot;: &quot;Run&quot;,
+    &quot;Python.rag.executor&quot;: &quot;Run&quot;,
+    &quot;Python.scheduler.executor&quot;: &quot;Run&quot;,
+    &quot;Python.settings_manager.executor&quot;: &quot;Run&quot;,
+    &quot;Python.sync_manager.executor&quot;: &quot;Run&quot;,
+    &quot;Python.testing_ground.executor&quot;: &quot;Run&quot;,
+    &quot;Python.voice.executor&quot;: &quot;Run&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
+    &quot;ai.playground.ignore.import.keys.banner.in.settings&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;master&quot;,
+    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
-}]]></component>
+}</component>
   <component name="RecentsManager">
     <key name="MoveFile.RECENT_KEYS">
       <recent name="G:\PyCharm 2025.3.3\AI Assistant\data\" />
@@ -63,7 +58,7 @@
       <recent name="G:\PyCharm 2025.3.3\AI Assistant\data" />
     </key>
   </component>
-  <component name="RunManager">
+  <component name="RunManager" selected="Python.api">
     <configuration name="api" type="PythonConfigurationType" factoryName="Python" nameIsGenerated="true">
       <module name="Chatette_AI" />
       <option name="ENV_FILES" value="" />
