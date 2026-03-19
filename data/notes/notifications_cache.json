@@ -1,10 +1,10 @@
 {
-  "generated_at": "2026-03-18T16:45:28.938848",
-  "valid_until": "2026-03-18T23:59:59.938848",
+  "generated_at": "2026-03-19T13:24:09.293329",
+  "valid_until": "2026-03-19T23:59:59.293329",
   "has_reminders": true,
   "notifications": {
-    "9h": "Good morning Erick, just a heads up that you've got a pretty chill day ahead, but don't forget you're supposed to hit Aldi this afternoon after work. You're also coming up on that Saturday move with Leonie, so I'll make sure to keep that on your radar.",
-    "12h": "Lunchtime check-in, Erick, just a heads up that you've got a pretty chill afternoon ahead, with a stop at Aldi after work, and don't forget you're helping Leonie move on Saturday. Heads up, you might want to fuel up for that move, so grab something good for lunch.",
-    "18h": "Evening, Erick! Just keeping you in the loop, you've got a pretty chill week ahead, except for that apartment move with Leonie on Saturday, so make sure to get some rest before the big lift."
+    "9h": "Good morning Erick, just a heads up that you've got a pretty chill day ahead, but don't forget to swing by Aldi this afternoon after work. On your radar is also that move with Leonie coming up this Saturday, so you might want to start thinking about clearing your schedule for that.",
+    "12h": "Lunchtime check-in, Erick, just a heads up that you've got a pretty busy weekend coming up, especially with helping Leonie move to her new apartment on Saturday. Don't forget to swing by Aldi this afternoon after work to get some essentials before the weekend rush.",
+    "18h": "Evening, Erick, just a heads up that you've got a pretty packed Saturday coming up, especially with helping Leonie move to her new apartment. On your radar for tomorrow, don't forget to swing by Aldi after work, by the way."
   }
 }
