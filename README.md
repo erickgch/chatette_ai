@@ -1,6 +1,6 @@
 # 🐱 Chatette — Local AI Personal Assistant
 
-Chatette is a privacy-focused personal AI assistant that runs on your own hardware.
+Chatette is a DIY-spirited, privacy-focused personal AI assistant that runs on your own hardware.
 Built for people who want the power of a smart personal assistant without giving up
 their privacy or paying a subscription. Chatette runs on your machine, speaks your
 language, and works for you — not for an ad platform.
@@ -88,7 +88,7 @@ about your life.
 | Speech-to-Text | faster-whisper |
 | Text-to-Speech | Piper TTS |
 | Scheduler | APScheduler + Watchdog |
-| Android App | Flutter (Dart) |
+| Android App (ask for it) | Flutter (Dart) |
 | Calendar/Email | Google Calendar API + Gmail API (OAuth2) |
 
 ---
@@ -110,7 +110,7 @@ no internet required at all.
 ## Requirements
 
 - **OS:** Windows 10/11 (Linux/Mac untested but should work)
-- **Python:** 3.11+
+- **Python:** 3.11+ (tested with 3.13)
 - **Ollama:** https://ollama.com
 - **Groq account (free):** https://console.groq.com
 - **Google Cloud project** with Calendar and Gmail APIs enabled
