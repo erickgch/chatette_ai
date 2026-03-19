@@ -12,8 +12,9 @@ from note_manager import (
 )
 from datetime import datetime, timedelta
 from google_integration import create_calendar_event
+from pathlib import Path
 
-load_dotenv()
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL")

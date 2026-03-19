@@ -6,8 +6,9 @@ from dotenv import load_dotenv
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from ingestion import ingest_calendar_events, ingest_emails, ingest_notes, ingest_lists
+from pathlib import Path
 
-load_dotenv()
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 NOTES_PATH = os.getenv("NOTES_PATH")
 

@@ -1,8 +1,10 @@
 import os
+import Path
 from dotenv import load_dotenv
 from rag import ask
+from pathlib import Path
 
-load_dotenv()
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 def main():
     print("🤖 Personal Assistant Chatette is ready!")

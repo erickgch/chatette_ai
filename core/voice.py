@@ -6,7 +6,7 @@ import sounddevice as sd
 import soundfile as sf
 from faster_whisper import WhisperModel
 from dotenv import load_dotenv
-
+from pathlib import Path
 # === LISTENING PARAMETERS ===
 SAMPLE_RATE = 16000
 CHUNK_SIZE = 512
@@ -14,7 +14,8 @@ SILENCE_THRESHOLD = 30  # chunks of silence before stopping (~3 seconds)
 MIN_SPEECH_CHUNKS = 2   # minimum chunks to consider as speech
 # === === ===
 
-load_dotenv()
+
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 PIPER_PATH = os.getenv("PIPER_PATH")
 PIPER_VOICE = os.getenv("PIPER_VOICE")

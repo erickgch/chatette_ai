@@ -10,13 +10,13 @@ from langchain_community.document_loaders import TextLoader, PyPDFLoader
 from langchain_core.documents import Document
 from langchain_ollama import OllamaEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-from google_integration import get_upcoming_events, get_recent_emails
-
+from pathlib import Path
 # ==========================
 # Load environment variables
 # ==========================
-load_dotenv()
+load_dotenv(Path(__file__).parent.parent / ".env")
+
+from google_integration import get_upcoming_events, get_recent_emails
 
 CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH")
 DOCUMENTS_PATH = os.getenv("DOCUMENTS_PATH")

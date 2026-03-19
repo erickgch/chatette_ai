@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
-
+from pathlib import Path
 from scheduler import start_scheduler
 from rag import ask
 from ingestion import (
@@ -16,7 +16,7 @@ from ingestion import (
     ingest_emails, ingest_lists
 )
 
-load_dotenv()
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 
 # ===================================
