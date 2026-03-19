@@ -181,6 +181,8 @@ Or double-click `start_chatette.bat` on Windows.
 
 Chatette starts on `http://localhost:8000`.
 
+Note: without the APK, Chatette can be tested by running `chat.py` or `voice.py`.
+
 ---
 
 ## Android App
@@ -220,6 +222,7 @@ chatette_ai/
 │   ├── sync_manager.py       ← Phone ↔ PC two-way sync
 │   ├── google_integration.py ← Calendar and Gmail
 │   ├── settings_manager.py   ← Runtime settings
+│   ├── chat.py               ← Chat function test
 │   └── voice.py              ← Whisper STT + Piper TTS
 ├── data/
 │   └── notes/
