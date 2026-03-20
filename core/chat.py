@@ -1,7 +1,6 @@
 import os
-import Path
 from dotenv import load_dotenv
-from rag import ask
+from rag_lw import ask
 from pathlib import Path
 
 load_dotenv(Path(__file__).parent.parent / ".env")

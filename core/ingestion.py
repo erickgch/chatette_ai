@@ -4,13 +4,14 @@ import os
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
+from pydantic import BaseModel, field_validator, ValidationError
 
 from langchain_chroma import Chroma
 from langchain_community.document_loaders import TextLoader, PyPDFLoader
 from langchain_core.documents import Document
 from langchain_ollama import OllamaEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from pathlib import Path
+
 # ==========================
 # Load environment variables
 # ==========================
@@ -29,6 +30,46 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
 EMAIL_DAYS_WINDOW = int(os.getenv("EMAIL_DAYS_WINDOW", 14))
 CALENDAR_DAYS_AHEAD = int(os.getenv("CALENDAR_DAYS_AHEAD", 14))
 CALENDAR_DAYS_BEHIND = int(os.getenv("CALENDAR_DAYS_BEHIND", 1))
+
+
+# ==========================
+# Pydantic model
+# ==========================
+
+VALID_COLLECTIONS = {"documents", "notes", "lists", "calendar", "emails"}
+
+class ChunkMetadata(BaseModel):
+    collection: str
+    source_file: str
+
+    @field_validator("collection")
+    @classmethod
+    def must_be_valid_collection(cls, v: str) -> str:
+        if v not in VALID_COLLECTIONS:
+            raise ValueError(f"Unknown collection '{v}'. Must be one of: {VALID_COLLECTIONS}")
+        return v
+
+    @field_validator("source_file")
+    @classmethod
+    def must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("source_file must not be empty")
+        return v.strip()
+
+
+def _apply_chunk_metadata(chunk, collection: str, source_file: str) -> bool:
+    """
+    Validate metadata with ChunkMetadata, then assign fields manually to the chunk.
+    Returns False and skips the chunk if validation fails.
+    """
+    try:
+        meta = ChunkMetadata(collection=collection, source_file=source_file)
+    except ValidationError as e:
+        print(f"⚠️ Invalid chunk metadata — skipping chunk: {e}")
+        return False
+    chunk.metadata["collection"] = meta.collection
+    chunk.metadata["source_file"] = meta.source_file
+    return True
 
 
 # ==========================
@@ -86,12 +127,10 @@ def ingest_file(filepath: str, collection: str = "documents"):
         print(f"File not found: {filepath}")
         return
 
-    # Skip empty files
     if path.stat().st_size == 0:
         print(f"⚠️ Skipping empty file: {path.name}")
         return
 
-    # Skip files with only whitespace
     content = path.read_text(encoding="utf-8").strip()
     if not content:
         print(f"⚠️ Skipping blank file: {path.name}")
@@ -110,11 +149,13 @@ def ingest_file(filepath: str, collection: str = "documents"):
     documents = loader.load()
     chunks = text_splitter.split_documents(documents)
 
+    valid_chunks = []
     for chunk in chunks:
-        chunk.metadata["collection"] = collection
-        chunk.metadata["source_file"] = path.name
+        if _apply_chunk_metadata(chunk, collection, path.name):
+            valid_chunks.append(chunk)
 
-    vectorstore.add_documents(chunks)
+    if valid_chunks:
+        vectorstore.add_documents(valid_chunks)
 
 
 # ==========================
@@ -148,12 +189,10 @@ def ingest_notes():
         print("Notes folder not found.")
         return
 
-    # Ingest top-level note files (reminders.txt, personal_notes.txt)
     for file in notes_path.iterdir():
         if file.is_file():
             ingest_file(str(file), collection="notes")
 
-    # Ingest drafts subfolder
     drafts_path = notes_path / "drafts"
     if drafts_path.exists():
         for file in drafts_path.iterdir():
@@ -178,7 +217,6 @@ def ingest_lists():
 
     for file in lists_path.iterdir():
         if file.is_file() and file.suffix == ".txt":
-            # Skip empty files
             if file.stat().st_size == 0:
                 print(f"⚠️ Skipping empty list: {file.name}")
                 continue
@@ -191,11 +229,13 @@ def ingest_lists():
             documents = loader.load()
             chunks = text_splitter.split_documents(documents)
 
+            valid_chunks = []
             for chunk in chunks:
-                chunk.metadata["collection"] = "lists"
-                chunk.metadata["source_file"] = file.name
+                if _apply_chunk_metadata(chunk, "lists", file.name):
+                    valid_chunks.append(chunk)
 
-            vectorstore.add_documents(chunks)
+            if valid_chunks:
+                vectorstore.add_documents(valid_chunks)
 
 
 # ==========================
@@ -235,12 +275,10 @@ Description: {event.get('description', '')}
 
         doc = Document(
             page_content=text.strip(),
-            metadata={
-                "collection": "calendar",
-                "source_file": "google_calendar"
-            }
+            metadata={}
         )
-        documents.append(doc)
+        if _apply_chunk_metadata(doc, "calendar", "google_calendar"):
+            documents.append(doc)
 
     chunks = text_splitter.split_documents(documents)
     vectorstore.add_documents(chunks)
@@ -268,7 +306,6 @@ def ingest_emails():
     for email in emails:
         date = human_datetime(email.get("date"))
 
-        # Limit email body to 400 chars
         body = email.get("body", "")
         if body:
             body = body.strip()[:400]
@@ -286,12 +323,10 @@ Body:
 
         doc = Document(
             page_content=text.strip(),
-            metadata={
-                "collection": "emails",
-                "source_file": "gmail"
-            }
+            metadata={}
         )
-        documents.append(doc)
+        if _apply_chunk_metadata(doc, "emails", "gmail"):
+            documents.append(doc)
 
     chunks = email_splitter.split_documents(documents)
     vectorstore.add_documents(chunks)

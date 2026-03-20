@@ -1,4 +1,5 @@
 import os
+import re
 import threading
 import tempfile
 import subprocess
@@ -10,7 +11,7 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from pathlib import Path
 from scheduler import start_scheduler
-from rag import ask
+from rag_lw import ask, handle_reminder, handle_calendar_event, handle_delete, handle_delete_event, handle_draft, handle_personal_note, handle_weather
 from ingestion import (
     ingest_all, ingest_notes, ingest_calendar_events,
     ingest_emails, ingest_lists
@@ -69,6 +70,12 @@ class SettingsRequest(BaseModel):
     email_days_window: int
     calendar_days_ahead: int
     calendar_days_behind: int
+    delete_event_days_ahead: int = 60
+
+class CommandRequest(BaseModel):
+    command: str   # e.g. "reminder", "calendar", "draft", "journal", "weather"
+    payload: str = ""  # user-typed text after the command prefix
+    lang: str = "en"
 
 
 # ===================================
@@ -103,6 +110,86 @@ def chat(request: QuestionRequest):
         answer = ask(request.question, mode=request.mode, lang=request.lang)
         print(f"✅ Answer: '{answer[:80]}...'")
         return AnswerResponse(question=request.question, answer=answer, mode=request.mode)
+    except Exception as e:
+        error_str = str(e).lower()
+        if "rate limit" in error_str or "429" in error_str or "quota" in error_str:
+            raise HTTPException(status_code=429, detail="rate_limit_reached")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ===================================
+# Command (hardcoded shortcuts — no intent classification)
+# ===================================
+
+@app.post("/command", response_model=AnswerResponse)
+def command(request: CommandRequest):
+    """
+    Execute a hardcoded command directly, bypassing LLM intent classification.
+    Used by app shortcut buttons to avoid token cost and latency of classification.
+    """
+    cmd = request.command.strip().lower()
+    payload = request.payload.strip()
+    lang = request.lang
+
+    # Build a synthetic question from command + payload for context
+    question = payload if payload else cmd
+
+    try:
+        if cmd == "reminder":
+            extracted = {"items": [payload]} if payload else {}
+            answer = handle_reminder(question, extracted, lang)
+
+        elif cmd == "calendar":
+            extracted = {"title": payload, "description": ""} if payload else {}
+            answer = handle_calendar_event(question, extracted, lang)
+
+        elif cmd == "draft":
+            extracted = {"type": "", "purpose": payload} if payload else {}
+            answer = handle_draft(question, extracted, lang)
+
+        elif cmd == "journal":
+            extracted = {"items": [payload]} if payload else {}
+            answer = handle_personal_note(question, extracted, lang)
+
+        elif cmd == "weather":
+            # Parse free-form payload — separate city from timeframe keywords
+            timeframe = "today"
+            city = payload.strip()
+            # Strip leading prepositions ("weather in London" → "London")
+            city = re.sub(r"^(in|for|at|near)\s+", "", city, flags=re.IGNORECASE).strip()
+            timeframe_keywords = {
+                "tomorrow": ["tomorrow", "morgen", "mañana"],
+                "now":      ["now", "current", "currently", "jetzt", "aktuell", "ahora"],
+                "week":     ["this week", "week", "woche", "semana", "7 days"],
+            }
+            for tf, keywords in timeframe_keywords.items():
+                for kw in keywords:
+                    if kw in city.lower():
+                        timeframe = tf
+                        city = re.sub(rf"\b{re.escape(kw)}\b", "", city, flags=re.IGNORECASE).strip(" ,")
+                        break
+            extracted = {"city": city.strip(), "timeframe": timeframe}
+            answer = handle_weather(question, extracted, lang)
+
+        elif cmd == "delete_reminder":
+            extracted = {"text": payload}
+            answer = handle_delete(question, extracted, lang)
+
+        elif cmd == "delete_event":
+            extracted = {"title": payload}
+            answer = handle_delete_event(question, extracted, lang)
+
+        elif cmd == "delete_list":
+            from rag_lw import handle_delete_list
+            extracted = {"list_name": payload}
+            answer = handle_delete_list(question, extracted, lang)
+
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown command: {cmd}")
+
+        print(f"✅ Command '{cmd}' → '{answer[:80]}...'")
+        return AnswerResponse(question=question, answer=answer, mode="command")
+
     except Exception as e:
         error_str = str(e).lower()
         if "rate limit" in error_str or "429" in error_str or "quota" in error_str:
@@ -380,6 +467,7 @@ def save_settings(request: SettingsRequest):
         "email_days_window": request.email_days_window,
         "calendar_days_ahead": request.calendar_days_ahead,
         "calendar_days_behind": request.calendar_days_behind,
+        "delete_event_days_ahead": request.delete_event_days_ahead,
     })
     if not success:
         raise HTTPException(status_code=500, detail="Failed to save settings")

@@ -20,8 +20,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly"
 ]
 
-CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE")
-TOKEN_FILE = os.getenv("GOOGLE_TOKEN_FILE")
+CREDENTIALS_FILE = Path(__file__).parent.parent / os.getenv("GOOGLE_CREDENTIALS_FILE")
+TOKEN_FILE = Path(__file__).parent.parent / os.getenv("GOOGLE_TOKEN_FILE")
 
 EMAIL_DAYS_WINDOW = int(os.getenv("EMAIL_DAYS_WINDOW", 14))
 CALENDAR_DAYS_AHEAD = int(os.getenv("CALENDAR_DAYS_AHEAD", 14))

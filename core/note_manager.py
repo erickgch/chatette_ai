@@ -1,8 +1,10 @@
 import os
 import re
 from datetime import datetime
+from typing import TypedDict
 from dotenv import load_dotenv
 from pathlib import Path
+from pydantic import BaseModel, field_validator, ValidationError
 
 load_dotenv()
 
@@ -27,15 +29,83 @@ _ensure_files_exist()
 
 
 # ==========================
+# Pydantic models
+# ==========================
+
+class ReminderItem(BaseModel):
+    text: str
+    created_at: str = ""
+
+    @field_validator("text")
+    @classmethod
+    def text_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Reminder text must not be empty")
+        return v.strip()
+
+
+class PersonalNoteItem(BaseModel):
+    text: str
+    created_at: str = ""
+
+    @field_validator("text")
+    @classmethod
+    def text_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Personal note text must not be empty")
+        return v.strip()
+
+
+class DraftItem(BaseModel):
+    title: str
+    content: str
+    created_at: str = ""
+
+    @field_validator("title", "content")
+    @classmethod
+    def must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Field must not be empty")
+        return v.strip()
+
+
+class ListItem(BaseModel):
+    index: int
+    text: str
+    checked: bool
+
+
+# TypedDicts — lightweight read-only return shapes, no validation needed
+class DraftMeta(TypedDict):
+    filename: str
+    path: str
+    modified: str
+
+
+class ListMeta(TypedDict):
+    filename: str
+    path: str
+    modified: str
+
+
+# ==========================
 # Reminders
 # ==========================
 
-def save_reminder(text: str):
-    """Append a reminder to reminders.txt."""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+def save_reminder(text: str) -> None:
+    """Validate and append a reminder to reminders.txt."""
+    try:
+        item = ReminderItem(
+            text=text,
+            created_at=datetime.now().strftime("%Y-%m-%d %H:%M")
+        )
+    except ValidationError as e:
+        print(f"⚠️ Invalid reminder — skipping: {e}")
+        return
+
     with open(REMINDERS_FILE, "a", encoding="utf-8") as f:
-        f.write(f"[{timestamp}] {text}\n")
-    print(f"✅ Reminder saved: {text}")
+        f.write(f"[{item.created_at}] {item.text}\n")
+    print(f"✅ Reminder saved: {item.text}")
 
 
 def delete_reminder_by_line(line_to_delete: str) -> str:
@@ -80,7 +150,7 @@ def get_all_reminders() -> str:
     return content if content else "No reminders found."
 
 
-def get_reminders_as_lines() -> list:
+def get_reminders_as_lines() -> list[str]:
     """Read all reminders as a list of strings."""
     if not os.path.exists(REMINDERS_FILE):
         return []
@@ -93,12 +163,20 @@ def get_reminders_as_lines() -> list:
 # Personal Notes
 # ==========================
 
-def save_personal_note(text: str):
-    """Append a note to personal_notes.txt."""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+def save_personal_note(text: str) -> None:
+    """Validate and append a note to personal_notes.txt."""
+    try:
+        item = PersonalNoteItem(
+            text=text,
+            created_at=datetime.now().strftime("%Y-%m-%d %H:%M")
+        )
+    except ValidationError as e:
+        print(f"⚠️ Invalid personal note — skipping: {e}")
+        return
+
     with open(PERSONAL_NOTES_FILE, "a", encoding="utf-8") as f:
-        f.write(f"[{timestamp}] {text}\n")
-    print(f"✅ Personal note saved: {text}")
+        f.write(f"[{item.created_at}] {item.text}\n")
+    print(f"✅ Personal note saved: {item.text}")
 
 
 def get_all_personal_notes() -> str:
@@ -110,14 +188,14 @@ def get_all_personal_notes() -> str:
     return content if content else "No personal notes found."
 
 
-def update_personal_notes(content: str):
+def update_personal_notes(content: str) -> None:
     """Overwrite personal notes with new content."""
     with open(PERSONAL_NOTES_FILE, "w", encoding="utf-8") as f:
         f.write(content)
     print("✅ Personal notes updated")
 
 
-def delete_personal_notes():
+def delete_personal_notes() -> None:
     """Clear all personal notes."""
     with open(PERSONAL_NOTES_FILE, "w", encoding="utf-8") as f:
         f.write("")
@@ -129,28 +207,38 @@ def delete_personal_notes():
 # ==========================
 
 def save_draft(title: str, content: str) -> str:
-    """Save a draft to the drafts folder."""
+    """Validate and save a draft to the drafts folder."""
+    try:
+        item = DraftItem(
+            title=title,
+            content=content,
+            created_at=datetime.now().strftime("%Y-%m-%d %H:%M")
+        )
+    except ValidationError as e:
+        print(f"⚠️ Invalid draft — aborting: {e}")
+        return ""
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    clean_title = "".join(c if c.isalnum() or c in " _-" else "" for c in title)
+    clean_title = "".join(c if c.isalnum() or c in " _-" else "" for c in item.title)
     clean_title = clean_title.strip().replace(" ", "_").lower()[:40]
     if not clean_title:
         clean_title = "draft"
     filename = f"{clean_title}_{timestamp}.txt"
     filepath = os.path.join(DRAFTS_PATH, filename)
     with open(filepath, "w", encoding="utf-8") as f:
-        f.write(f"Draft: {title}\n")
-        f.write(f"Created: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
+        f.write(f"Draft: {item.title}\n")
+        f.write(f"Created: {item.created_at}\n")
         f.write("-" * 40 + "\n\n")
-        f.write(content)
+        f.write(item.content)
     print(f"✅ Draft saved: {filename}")
     return filename
 
 
-def get_all_drafts() -> list:
+def get_all_drafts() -> list[DraftMeta]:
     """List all drafts."""
     if not os.path.exists(DRAFTS_PATH):
         return []
-    drafts = []
+    drafts: list[DraftMeta] = []
     for file in sorted(Path(DRAFTS_PATH).iterdir(), reverse=True):
         if file.suffix == ".txt":
             drafts.append({
@@ -197,7 +285,7 @@ def delete_draft(filename: str) -> bool:
 # Lists
 # ==========================
 
-def create_list(title: str, items: list = []) -> str:
+def create_list(title: str, items: list[str] = []) -> str:
     """Create a new markdown checkbox list."""
     timestamp_iso = datetime.now().isoformat()
     timestamp_readable = datetime.now().strftime("%A, %d %B %Y at %H:%M")
@@ -207,13 +295,13 @@ def create_list(title: str, items: list = []) -> str:
     if not clean_title:
         clean_title = "list"
 
-    filename = f"{clean_title}.txt"  # clean filename, no timestamp
+    filename = f"{clean_title}.txt"
     filepath = os.path.join(LISTS_PATH, filename)
 
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(f"# {title}\n")
-        f.write(f"<!-- created: {timestamp_iso} -->\n")  # hidden ISO date for Chatette
-        f.write(f"Created on: {timestamp_readable}\n\n")  # human readable
+        f.write(f"<!-- created: {timestamp_iso} -->\n")
+        f.write(f"Created on: {timestamp_readable}\n\n")
         for item in items:
             f.write(f"- [ ] {item}\n")
 
@@ -221,11 +309,11 @@ def create_list(title: str, items: list = []) -> str:
     return filename
 
 
-def get_all_lists() -> list:
+def get_all_lists() -> list[ListMeta]:
     """List all lists."""
     if not os.path.exists(LISTS_PATH):
         return []
-    lists = []
+    lists: list[ListMeta] = []
     for file in sorted(Path(LISTS_PATH).iterdir(), reverse=True):
         if file.suffix == ".txt":
             lists.append({
@@ -247,25 +335,17 @@ def get_list_content(filename: str) -> str:
         return f.read()
 
 
-def get_list_items(filename: str) -> list:
-    """Parse list items into structured data."""
+def get_list_items(filename: str) -> list[ListItem]:
+    """Parse list items into validated ListItem models."""
     content = get_list_content(filename)
     if content == "List not found.":
         return []
-    items = []
+    items: list[ListItem] = []
     for i, line in enumerate(content.split("\n")):
         if line.startswith("- [ ]"):
-            items.append({
-                "index": i,
-                "text": line[5:].strip(),
-                "checked": False
-            })
+            items.append(ListItem(index=i, text=line[5:].strip(), checked=False))
         elif line.startswith("- [x]") or line.startswith("- [X]"):
-            items.append({
-                "index": i,
-                "text": line[5:].strip(),
-                "checked": True
-            })
+            items.append(ListItem(index=i, text=line[5:].strip(), checked=True))
     return items
 
 
@@ -290,6 +370,7 @@ def add_item_to_list(filename: str, item: str) -> bool:
     print(f"✅ Item added to {filename}: {item}")
     return True
 
+
 def delete_list_item(filename: str, line_index: int) -> bool:
     """Delete a specific item from a list by line index."""
     filepath = os.path.join(LISTS_PATH, filename)
@@ -304,6 +385,7 @@ def delete_list_item(filename: str, line_index: int) -> bool:
         f.writelines(lines)
     print(f"🗑️ Deleted item at line {line_index}: {removed}")
     return True
+
 
 def toggle_list_item(filename: str, item_index: int) -> bool:
     """Toggle a checkbox item by its line index."""
