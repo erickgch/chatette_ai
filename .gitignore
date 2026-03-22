@@ -5,6 +5,7 @@
 .env
 token.pickle
 credentials.json
+data/notes/notifications_cache.json
 
 # ChromaDB data
 data/chroma_db/

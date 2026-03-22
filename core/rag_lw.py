@@ -1,6 +1,7 @@
 import os
 import json
 import re
+from pathlib import Path
 from dotenv import load_dotenv
 from langchain_ollama import OllamaEmbeddings, OllamaLLM
 from langchain_chroma import Chroma
@@ -13,8 +14,8 @@ from note_manager import (
     get_all_lists, delete_list, get_list_items, delete_list_item
 )
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
-from google_integration import create_calendar_event, delete_calendar_event, get_upcoming_events
+from google_integration import CalendarEvent, create_calendar_event, delete_calendar_event, get_upcoming_events
+from dt_utils import _local_tz, _parse_and_fix_dt
 from weather import (
     get_current_weather, get_today_forecast, get_weekly_forecast,
     format_weather_context, geocode
@@ -22,6 +23,7 @@ from weather import (
 from pydantic import BaseModel, field_validator, ValidationError, ConfigDict
 
 load_dotenv()
+os.chdir(Path(__file__).parent.parent)
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL")
@@ -220,7 +222,8 @@ class PendingState(BaseModel):
     action: str | None = None
     conflict: str | None = None
     line_to_delete: str | None = None
-    event_data: dict | None = None
+    event_data: CalendarEvent | dict | None = None
+    due: str | None = None
     lang: str = "en"
 
     def clear(self) -> None:
@@ -231,47 +234,13 @@ class PendingState(BaseModel):
         self.conflict = None
         self.line_to_delete = None
         self.event_data = None
+        self.due = None
         self.lang = "en"
 
 
 # Module-level pending state instance — mutated in place by all handlers
 pending_reminder = PendingState()
 
-
-def _local_tz() -> ZoneInfo:
-    """Derive local timezone from the system clock at runtime."""
-    try:
-        import time as _time
-        tz_name = _time.tzname[0]
-        return ZoneInfo(tz_name)
-    except Exception:
-        offset = datetime.now().astimezone().utcoffset()
-        return timezone(offset)
-
-
-def _parse_and_fix_dt(value: str | None, fallback: datetime | None = None) -> str:
-    """
-    Parse an ISO datetime string from the LLM.
-    Injects local timezone if none is present.
-    """
-    if not value:
-        if fallback is not None:
-            return fallback.isoformat()
-        raise ValueError("datetime is required but was not provided")
-
-    try:
-        dt = datetime.fromisoformat(value)
-    except (ValueError, TypeError):
-        raise ValueError(f"Could not parse datetime: '{value}'")
-
-    if dt.tzinfo is None:
-        try:
-            tz = _local_tz()
-            dt = dt.replace(tzinfo=tz)
-        except Exception:
-            pass
-
-    return dt.isoformat()
 
 
 class CalendarEventData(BaseModel):
@@ -449,7 +418,7 @@ The user wants to save reminders: "{question}"
 
 Extract ALL reminder items mentioned. Return ONLY a JSON array of strings.
 - Remove trigger phrases like "write down", "remind me", "make a note"
-- Convert relative dates to actual calendar dates
+- Keep dates in the text for now
 - One item per reminder, no explanations
 
 Examples:
@@ -457,7 +426,7 @@ Examples:
 → ["Buy flowers", "Call mom", "Visit uncle"]
 
 "write down dentist next Friday"
-→ ["Dentist appointment on Friday, March 27, 2026"]
+→ ["Dentist next Friday"]
 
 Output (JSON array only):"""
         try:
@@ -476,8 +445,39 @@ Output (JSON array only):"""
             lang
         )
 
-    if len(items) == 1:
-        reminder_text = items[0]
+    # Extract due dates separately from reminder text
+    due_prompt = f"""Today is {current_date}.
+For each reminder, split the task text from its due date.
+
+Reminders: {json.dumps(items)}
+
+Return a JSON array with one object per reminder:
+- "text": the task only, no date/time phrases
+- "due": ISO date string "YYYY-MM-DD" if a specific date is mentioned, otherwise null
+
+Examples:
+["Dentist next Friday"] → [{{"text": "Dentist", "due": "2026-03-27"}}]
+["Buy milk", "Call mom on April 3rd"] → [{{"text": "Buy milk", "due": null}}, {{"text": "Call mom", "due": "2026-04-03"}}]
+
+JSON array only:"""
+    try:
+        due_response = llm_invoke(due_prompt).strip()
+        due_response = due_response[due_response.find("["):due_response.rfind("]")+1]
+        due_items = json.loads(due_response)
+        due_items = [
+            {"text": str(d.get("text", items[i])).strip() or items[i], "due": d.get("due")}
+            for i, d in enumerate(due_items)
+            if i < len(items)
+        ]
+        # Pad if LLM returned fewer items than expected
+        for i in range(len(due_items), len(items)):
+            due_items.append({"text": items[i], "due": None})
+    except Exception:
+        due_items = [{"text": item, "due": None} for item in items]
+
+    if len(due_items) == 1:
+        reminder_text = due_items[0]["text"]
+        due_date = due_items[0]["due"]
         if all_reminders != "No reminders found.":
             conflict_prompt = f"""Check this list of reminders for duplicates or conflicts.
 
@@ -506,6 +506,7 @@ Reply with one of:
                 pending_reminder.action = "save"
                 pending_reminder.conflict = "duplicate"
                 pending_reminder.line_to_delete = existing_line
+                pending_reminder.due = due_date
                 pending_reminder.lang = lang
                 return _t(
                     f"Heads up — you already have something similar: '{existing_line}'. Want to replace it with '{reminder_text}'?",
@@ -520,6 +521,7 @@ Reply with one of:
                 pending_reminder.action = "save"
                 pending_reminder.conflict = "conflict"
                 pending_reminder.line_to_delete = existing_line
+                pending_reminder.due = due_date
                 pending_reminder.lang = lang
                 return _t(
                     f"Quick one — you already have '{existing_line}' around that time. Still want to save '{reminder_text}'?",
@@ -533,25 +535,31 @@ Reply with one of:
         pending_reminder.action = "save"
         pending_reminder.conflict = None
         pending_reminder.line_to_delete = None
+        pending_reminder.due = due_date
         pending_reminder.lang = lang
+        due_hint = f" (due {due_date})" if due_date else ""
         return _t(
-            f"Just to confirm — save this to reminders: '{reminder_text}'?",
-            f"Zur Bestätigung — in die Erinnerungen speichern: '{reminder_text}'?",
-            f"Para confirmar — ¿guardar esto en recordatorios: '{reminder_text}'?",
+            f"Just to confirm — save this to reminders: '{reminder_text}'{due_hint}?",
+            f"Zur Bestätigung — in die Erinnerungen speichern: '{reminder_text}'{due_hint}?",
+            f"Para confirmar — ¿guardar esto en recordatorios: '{reminder_text}'{due_hint}?",
             lang
         )
 
-    preview = "\n".join(f"  • {item}" for item in items)
+    preview = "\n".join(
+        f"  • {d['text']}" + (f" (due {d['due']})" if d.get("due") else "")
+        for d in due_items
+    )
     pending_reminder.text = None
-    pending_reminder.items = items
+    pending_reminder.items = due_items
     pending_reminder.action = "save_batch"
     pending_reminder.conflict = None
     pending_reminder.line_to_delete = None
+    pending_reminder.due = None
     pending_reminder.lang = lang
     return _t(
-        f"Save these {len(items)} reminders?\n{preview}",
-        f"Diese {len(items)} Erinnerungen speichern?\n{preview}",
-        f"¿Guardar estos {len(items)} recordatorios?\n{preview}",
+        f"Save these {len(due_items)} reminders?\n{preview}",
+        f"Diese {len(due_items)} Erinnerungen speichern?\n{preview}",
+        f"¿Guardar estos {len(due_items)} recordatorios?\n{preview}",
         lang
     )
 
@@ -636,9 +644,8 @@ def handle_delete_event(question: str, extracted: dict, lang: str = "en") -> str
         )
 
     events_summary = "\n".join([
-        f"- ID: {e['id']} | {e['title']} on {e['start']}"
+        f"- ID: {e.id} | {e.title} on {e.start}"
         for e in events
-        if 'id' in e
     ])
 
     hint = extracted.get("title", "")
@@ -1246,7 +1253,7 @@ def handle_view_events(question: str, lang: str = "en") -> str:
 
         lines = []
         for e in events:
-            lines.append(f"- {e.get('title')} on {e.get('start')}")
+            lines.append(f"- {e.title} on {e.start}")
         events_context = f"Today is: {current_date}\n\nUpcoming events:\n" + "\n".join(lines)
 
     format_prompt = f"""{_persona_prompt()}
@@ -1355,7 +1362,7 @@ def handle_confirmation(question: str, lang: str = "en") -> str:
         if action == "save":
             if line_to_delete and conflict in ["duplicate", "conflict"]:
                 delete_reminder_by_line(line_to_delete)
-            save_reminder(reminder_text)
+            save_reminder(reminder_text, due=pending_reminder.due)
             ingest_notes()
             pending_reminder.clear()
             return _t(
@@ -1368,7 +1375,10 @@ def handle_confirmation(question: str, lang: str = "en") -> str:
         elif action == "save_batch":
             items = pending_reminder.items or []
             for item in items:
-                save_reminder(item)
+                if isinstance(item, dict):
+                    save_reminder(item["text"], due=item.get("due"))
+                else:
+                    save_reminder(item)
             ingest_notes()
             pending_reminder.clear()
             count = len(items)

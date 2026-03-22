@@ -34,7 +34,8 @@ _ensure_files_exist()
 
 class ReminderItem(BaseModel):
     text: str
-    created_at: str = ""
+    created: str = ""
+    due: str | None = None
 
     @field_validator("text")
     @classmethod
@@ -42,6 +43,13 @@ class ReminderItem(BaseModel):
         if not v.strip():
             raise ValueError("Reminder text must not be empty")
         return v.strip()
+
+    @field_validator("due")
+    @classmethod
+    def due_must_be_valid_date(cls, v: str | None) -> str | None:
+        if v is not None:
+            datetime.strptime(v, "%Y-%m-%d")
+        return v
 
 
 class PersonalNoteItem(BaseModel):
@@ -92,71 +100,101 @@ class ListMeta(TypedDict):
 # Reminders
 # ==========================
 
-def save_reminder(text: str) -> None:
-    """Validate and append a reminder to reminders.txt."""
+def _read_reminders() -> list[ReminderItem]:
+    """Parse all reminders from JSON Lines file."""
+    if not os.path.exists(REMINDERS_FILE):
+        return []
+    items = []
+    with open(REMINDERS_FILE, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                items.append(ReminderItem.model_validate_json(line))
+            except Exception:
+                pass  # skip malformed lines
+    return items
+
+
+def _write_reminders(items: list[ReminderItem]) -> None:
+    """Write reminders list back to JSON Lines file."""
+    with open(REMINDERS_FILE, "w", encoding="utf-8") as f:
+        for item in items:
+            f.write(item.model_dump_json() + "\n")
+
+
+def save_reminder(text: str, due: str | None = None) -> None:
+    """Validate and append a reminder to reminders.txt as JSON Lines."""
     try:
         item = ReminderItem(
             text=text,
-            created_at=datetime.now().strftime("%Y-%m-%d %H:%M")
+            created=datetime.now().isoformat(timespec="seconds"),
+            due=due
         )
     except ValidationError as e:
         print(f"⚠️ Invalid reminder — skipping: {e}")
         return
 
     with open(REMINDERS_FILE, "a", encoding="utf-8") as f:
-        f.write(f"[{item.created_at}] {item.text}\n")
+        f.write(item.model_dump_json() + "\n")
     print(f"✅ Reminder saved: {item.text}")
 
 
 def delete_reminder_by_line(line_to_delete: str) -> str:
-    """Delete a reminder by closest line match."""
-    if not os.path.exists(REMINDERS_FILE):
+    """Delete a reminder by closest text match."""
+    items = _read_reminders()
+    if not items:
         return "No reminders found."
-    with open(REMINDERS_FILE, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-    matching = [l for l in lines if line_to_delete.strip() in l.strip()
-                or l.strip() in line_to_delete.strip()]
-    remaining = [l for l in lines if l not in matching]
+    needle = line_to_delete.strip().lower()
+    matching = [i for i in items if needle in i.text.lower() or i.text.lower() in needle]
     if not matching:
         return "I couldn't find that reminder."
-    with open(REMINDERS_FILE, "w", encoding="utf-8") as f:
-        f.writelines(l for l in remaining if l.strip())
-    deleted = [l.strip() for l in matching]
+    remaining = [i for i in items if i not in matching]
+    _write_reminders(remaining)
+    deleted = [i.text for i in matching]
     print(f"🗑️ Deleted: {deleted}")
     return f"Done! I've removed: {', '.join(deleted)}"
 
 
 def delete_reminder_by_index(index: int) -> str:
-    """Delete a reminder by line index (0-based)."""
-    if not os.path.exists(REMINDERS_FILE):
+    """Delete a reminder by index (0-based)."""
+    items = _read_reminders()
+    if not items:
         return "No reminders found."
-    with open(REMINDERS_FILE, "r", encoding="utf-8") as f:
-        lines = [l for l in f.readlines() if l.strip()]
-    if index < 0 or index >= len(lines):
+    if index < 0 or index >= len(items):
         return "Reminder not found."
-    removed = lines.pop(index).strip()
-    with open(REMINDERS_FILE, "w", encoding="utf-8") as f:
-        f.writelines(lines)
-    print(f"🗑️ Deleted reminder at index {index}: {removed}")
-    return f"Deleted: {removed}"
+    removed = items.pop(index)
+    _write_reminders(items)
+    print(f"🗑️ Deleted reminder at index {index}: {removed.text}")
+    return f"Deleted: {removed.text}"
 
 
 def get_all_reminders() -> str:
-    """Read all reminders as a single string."""
-    if not os.path.exists(REMINDERS_FILE):
+    """Read all reminders as a formatted string (for LLM context)."""
+    items = _read_reminders()
+    if not items:
         return "No reminders found."
-    with open(REMINDERS_FILE, "r", encoding="utf-8") as f:
-        content = f.read().strip()
-    return content if content else "No reminders found."
+    lines = []
+    for item in items:
+        due_part = f" (due: {item.due})" if item.due else ""
+        lines.append(f"- {item.text}{due_part}")
+    return "\n".join(lines)
 
 
 def get_reminders_as_lines() -> list[str]:
-    """Read all reminders as a list of strings."""
-    if not os.path.exists(REMINDERS_FILE):
-        return []
-    with open(REMINDERS_FILE, "r", encoding="utf-8") as f:
-        lines = [l.strip() for l in f.readlines() if l.strip()]
+    """Read all reminders as a list of display strings."""
+    items = _read_reminders()
+    lines = []
+    for item in items:
+        due_part = f" (due: {item.due})" if item.due else ""
+        lines.append(f"{item.text}{due_part}")
     return lines
+
+
+def get_reminders_list() -> list[ReminderItem]:
+    """Return all reminders as structured ReminderItem objects."""
+    return _read_reminders()
 
 
 # ==========================

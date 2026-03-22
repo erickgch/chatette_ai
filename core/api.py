@@ -6,7 +6,7 @@ import subprocess
 import uvicorn
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from pathlib import Path
@@ -66,11 +66,39 @@ class AddItemRequest(BaseModel):
     item: str
 
 class SettingsRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     model_selection: str
     email_days_window: int
     calendar_days_ahead: int
     calendar_days_behind: int
     delete_event_days_ahead: int = 60
+
+class ReminderResponse(BaseModel):
+    index: int
+    text: str
+    due: str | None
+    created: str
+
+class RemindersListResponse(BaseModel):
+    reminders: list[ReminderResponse]
+
+class ListItemResponse(BaseModel):
+    index: int
+    text: str
+    checked: bool
+
+class ListDetailResponse(BaseModel):
+    content: str
+    items: list[ListItemResponse]
+
+# SyncPullResponse: model defined but not yet wired to /sync/pull —
+# wiring it requires restructuring build_pull_response() and updating
+# sync_service.dart to match the new reminders shape.
+class SyncPullResponse(BaseModel):
+    reminders: list[ReminderResponse]
+    conflict_files: list[str] = []
+    timestamp: str
 
 class CommandRequest(BaseModel):
     command: str   # e.g. "reminder", "calendar", "draft", "journal", "weather"
@@ -290,11 +318,14 @@ def trigger_ingest_lists():
 # Reminders
 # ===================================
 
-@app.get("/reminders")
+@app.get("/reminders", response_model=RemindersListResponse)
 def get_reminders():
-    """Get all reminders as a list of lines."""
-    from note_manager import get_reminders_as_lines
-    return {"reminders": get_reminders_as_lines()}
+    """Get all reminders as structured objects."""
+    from note_manager import get_reminders_list
+    return {"reminders": [
+        {"index": i, **r.model_dump()}
+        for i, r in enumerate(get_reminders_list())
+    ]}
 
 @app.delete("/reminders/{index}")
 def delete_reminder_line(index: int):
@@ -379,13 +410,13 @@ def get_lists():
     from note_manager import get_all_lists
     return {"lists": get_all_lists()}
 
-@app.get("/lists/{filename}")
+@app.get("/lists/{filename}", response_model=ListDetailResponse)
 def get_list(filename: str):
     """Get a list's items as structured data."""
     from note_manager import get_list_items, get_list_content
     return {
         "content": get_list_content(filename),
-        "items": get_list_items(filename)
+        "items": [i.model_dump() for i in get_list_items(filename)]
     }
 
 @app.post("/lists")
@@ -461,14 +492,18 @@ def get_settings():
 @app.post("/settings")
 def save_settings(request: SettingsRequest):
     """Save settings to .env and restart api.py."""
-    from settings_manager import write_settings
-    success = write_settings({
-        "model_selection": request.model_selection,
-        "email_days_window": request.email_days_window,
-        "calendar_days_ahead": request.calendar_days_ahead,
-        "calendar_days_behind": request.calendar_days_behind,
-        "delete_event_days_ahead": request.delete_event_days_ahead,
-    })
+    from settings_manager import read_settings, write_settings, ChatetteSettings
+    current = read_settings()
+    updated = ChatetteSettings(
+        server_url=current.server_url,
+        model_selection=request.model_selection,
+        use_groq=request.model_selection != "local",
+        groq_model=request.model_selection if request.model_selection != "local" else current.groq_model,
+        email_days_window=request.email_days_window,
+        calendar_days_ahead=request.calendar_days_ahead,
+        calendar_days_behind=request.calendar_days_behind,
+    )
+    success = write_settings(updated)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to save settings")
 

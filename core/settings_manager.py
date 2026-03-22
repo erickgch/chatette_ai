@@ -42,7 +42,7 @@ class ChatetteSettings(BaseModel):
 
 def read_settings() -> ChatetteSettings:
     """Read current settings from .env and return a validated ChatetteSettings."""
-    load_dotenv(ENV_PATH)
+    load_dotenv(ENV_PATH, override=True)
     use_groq = os.getenv("USE_GROQ", "false").lower() == "true"
     groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 

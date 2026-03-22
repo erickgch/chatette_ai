@@ -1,5 +1,4 @@
 # ingest absorbs the information in the database, i.e., the source text files
-
 import os
 from pathlib import Path
 from datetime import datetime
@@ -16,6 +15,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 # Load environment variables
 # ==========================
 load_dotenv(Path(__file__).parent.parent / ".env")
+os.chdir(Path(__file__).parent.parent)
 
 from google_integration import get_upcoming_events, get_recent_emails
 
@@ -30,7 +30,6 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
 EMAIL_DAYS_WINDOW = int(os.getenv("EMAIL_DAYS_WINDOW", 14))
 CALENDAR_DAYS_AHEAD = int(os.getenv("CALENDAR_DAYS_AHEAD", 14))
 CALENDAR_DAYS_BEHIND = int(os.getenv("CALENDAR_DAYS_BEHIND", 1))
-
 
 # ==========================
 # Pydantic model

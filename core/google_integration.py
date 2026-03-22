@@ -9,6 +9,8 @@ from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from pathlib import Path
+from pydantic import BaseModel, Field, field_validator, ValidationError, ConfigDict
+from dt_utils import _local_tz, _parse_and_fix_dt
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
@@ -26,6 +28,36 @@ TOKEN_FILE = Path(__file__).parent.parent / os.getenv("GOOGLE_TOKEN_FILE")
 EMAIL_DAYS_WINDOW = int(os.getenv("EMAIL_DAYS_WINDOW", 14))
 CALENDAR_DAYS_AHEAD = int(os.getenv("CALENDAR_DAYS_AHEAD", 14))
 CALENDAR_DAYS_BEHIND = int(os.getenv("CALENDAR_DAYS_BEHIND", 1))
+
+
+# ========================
+# Pydantic models
+# ========================
+
+class CalendarEvent(BaseModel):
+    id: str
+    title: str
+    start: str
+    end: str | None = None
+    description: str = ""
+    attendees: list[str] = []
+
+    @field_validator("start", "end", mode="before")
+    @classmethod
+    def validate_dt(cls, v):
+        if v is None:
+            return None
+        return _parse_and_fix_dt(v)
+
+
+class EmailMessage(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    from_: str = Field(alias="from")
+    subject: str
+    date: str
+    body: str = ""
 
 
 # ========================
@@ -58,7 +90,7 @@ def get_google_credentials():
 # Calendar
 # ========================
 
-def get_upcoming_events(days_ahead: int = None, days_behind: int = None) -> list:
+def get_upcoming_events(days_ahead: int = None, days_behind: int = None) -> list[CalendarEvent]:
     """Fetch calendar events within a time window."""
 
     if days_ahead is None:
@@ -85,20 +117,26 @@ def get_upcoming_events(days_ahead: int = None, days_behind: int = None) -> list
 
     events = events_result.get("items", [])
 
-    formatted_events = []
+    formatted_events: list[CalendarEvent] = []
 
     for event in events:
         start = event["start"].get("dateTime", event["start"].get("date"))
         end = event["end"].get("dateTime", event["end"].get("date"))
-
-        formatted_events.append({
-            "id": event.get("id", ""),
-            "title": event.get("summary", "No title"),
-            "start": start,
-            "end": end,
-            "description": event.get("description", ""),
-            "location": event.get("location", "")
-        })
+        attendees = [
+            a.get("email", "") for a in event.get("attendees", [])
+            if a.get("email")
+        ]
+        try:
+            formatted_events.append(CalendarEvent.model_validate({
+                "id": event.get("id", ""),
+                "title": event.get("summary", "No title"),
+                "start": start,
+                "end": end,
+                "description": event.get("description", ""),
+                "attendees": attendees,
+            }))
+        except ValidationError as e:
+            print(f"⚠️ Skipping malformed calendar event: {e}")
 
     return formatted_events
 
@@ -166,7 +204,7 @@ def _clean_email_body(body: str) -> str:
     return body.strip()[:400]
 
 
-def get_recent_emails(max_results: int = 10, days_window: int = None) -> list:
+def get_recent_emails(max_results: int = 10, days_window: int = None) -> list[EmailMessage]:
     """Fetch recent emails within time window."""
 
     if days_window is None:
@@ -191,7 +229,7 @@ def get_recent_emails(max_results: int = 10, days_window: int = None) -> list:
 
     messages = results.get("messages", [])
 
-    formatted_emails = []
+    formatted_emails: list[EmailMessage] = []
 
     for msg in messages:
         msg_detail = service.users().messages().get(
@@ -227,13 +265,17 @@ def get_recent_emails(max_results: int = 10, days_window: int = None) -> list:
                     errors="ignore"
                 )
 
-        body = _clean_email_body(body) if body else "No body content"
-        formatted_emails.append({
-            "subject": subject,
-            "from": sender,
-            "date": date,
-            "body": body
-        })
+        body = _clean_email_body(body) if body else ""
+        try:
+            formatted_emails.append(EmailMessage.model_validate({
+                "id": msg["id"],
+                "from": sender,
+                "subject": subject,
+                "date": date,
+                "body": body,
+            }))
+        except ValidationError as e:
+            print(f"⚠️ Skipping malformed email: {e}")
 
     return formatted_emails
 
@@ -248,10 +290,10 @@ if __name__ == "__main__":
 
     print("\n📅 Events:")
     for event in events:
-        print(f"  - {event['title']} at {event['start']}")
+        print(f"  - {event.title} at {event.start}")
 
     emails = get_recent_emails(max_results=5)
 
     print("\n📧 Emails:")
     for email in emails:
-        print(f"  - {email['subject']} from {email['from']}")
+        print(f"  - {email.subject} from {email.from_}")
