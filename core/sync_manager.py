@@ -38,15 +38,32 @@ class SyncState(BaseModel):
 # ===========================
 
 def _merge_reminders(pc_content: str, phone_content: str) -> str:
-    """Union merge — deduplicate by stripped line text."""
-    seen = set()
-    merged = []
+    """Union merge — deduplicate by text field; keep the reminder with the earlier created timestamp."""
+    import json
+    best: dict[str, dict] = {}  # text -> reminder dict with best (earliest) created
+
     for line in (pc_content + "\n" + phone_content).splitlines():
         line = line.strip()
-        if line and line not in seen:
-            seen.add(line)
-            merged.append(line)
-    return "\n".join(merged)
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            print(f"⚠️ Skipping malformed reminder line: {line!r}")
+            continue
+        text = item.get("text", "")
+        if not text:
+            continue
+        if text not in best:
+            best[text] = item
+        else:
+            # Keep the one with the earlier created timestamp
+            existing_created = best[text].get("created", "")
+            incoming_created = item.get("created", "")
+            if incoming_created and incoming_created < existing_created:
+                best[text] = item
+
+    return "\n".join(json.dumps(item, ensure_ascii=False) for item in best.values())
 
 
 def _parse_list_items(content: str) -> list:
