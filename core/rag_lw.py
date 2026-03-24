@@ -8,7 +8,7 @@ from langchain_chroma import Chroma
 from langchain_core.prompts import PromptTemplate
 from ingestion import ingest_notes, ingest_calendar_events, ingest_lists
 from note_manager import (
-    save_reminder, delete_reminder_by_line, get_all_reminders,
+    create_reminder, delete_reminder_by_line, get_all_reminders,
     save_personal_note, save_draft,
     create_list, add_item_to_list, find_list_by_name,
     get_all_lists, delete_list, get_list_items, delete_list_item
@@ -170,7 +170,7 @@ conversation_context = {"last_question": None, "last_answer": None}
 # ===================================
 
 VALID_INTENTS = [
-    "save_reminder",
+    "create_reminder",
     "delete_reminder",
     "create_event",
     "delete_event",
@@ -178,7 +178,7 @@ VALID_INTENTS = [
     "create_draft",
     "create_list",
     "add_to_list",
-    "remove_list_item",
+    "remove_from_list",
     "delete_list",
     "view_reminders",
     "view_events",
@@ -297,7 +297,7 @@ User message: "{question}"
 Classify this message into exactly one intent and extract relevant data.
 
 Valid intents:
-- save_reminder: user wants to save a reminder (e.g. "remind me to...", "write down...", "note that...")
+- create_reminder: user wants to save a reminder (e.g. "remind me to...", "write down...", "note that...")
 - delete_reminder: user wants to delete a reminder (e.g. "delete the reminder...", "forget about...")
 - create_event: user wants to add a calendar event (e.g. "add to my calendar", "schedule a meeting...")
 - delete_event: user wants to remove a calendar event (e.g. "cancel my appointment", "remove the event...", "can you delete the...")
@@ -305,7 +305,7 @@ Valid intents:
 - create_draft: user wants to compose a document/email/letter (e.g. "compose a...", "write a draft...", "help me write...")
 - create_list: user wants to create a new list (e.g. "create a shopping list", "make a list...")
 - add_to_list: user wants to add an item to an existing list (e.g. "add milk to my shopping list")
-- remove_list_item: user wants to remove an item from a list (e.g. "remove milk from the list")
+- remove_from_list: user wants to remove an item from a list (e.g. "remove milk from the list")
 - delete_list: user wants to delete an entire list (e.g. "delete my shopping list")
 - view_reminders: user wants to see their saved reminders or to-do items (e.g. "show my reminders", "what do I have to do?", "what did I write down?")
 - view_events: user wants to see their calendar events or appointments (e.g. "do I have anything this week?", "what's on my calendar?", "any appointments coming up?", "what are my plans for tomorrow?")
@@ -316,7 +316,7 @@ Valid intents:
 For the extracted field, include only what is relevant.
 IMPORTANT: If the user mentions multiple items of the same type, extract ALL of them as an array.
 
-- save_reminder: {{"items": ["reminder 1", "reminder 2", ...]}} — ALWAYS use items array, even for one item
+- create_reminder: {{"items": ["reminder 1", "reminder 2", ...]}} — ALWAYS use items array, even for one item
 - delete_reminder: {{"text": "the reminder description"}}
 - create_event: {{"events": [{{"title": "...", "description": "..."}}, ...]}} — ALWAYS use events array, even for one event
 - delete_event: {{"title": "event title"}}
@@ -324,7 +324,7 @@ IMPORTANT: If the user mentions multiple items of the same type, extract ALL of 
 - create_draft: {{"type": "email/letter/message", "purpose": "what it's about"}}
 - create_list: {{"title": "list name", "items": ["item1", "item2"]}}
 - add_to_list: {{"items": ["item1", "item2", ...], "list_name": "target list"}} — ALWAYS use items array
-- remove_list_item: {{"item": "item name", "list_name": "target list"}}
+- remove_from_list: {{"item": "item name", "list_name": "target list"}}
 - delete_list: {{"list_name": "list to delete"}}
 - get_weather: {{"city": "city name or empty for home", "timeframe": "now|today|tomorrow|week"}}
 - view_reminders / view_events / about_chatette / general: {{}}
@@ -786,9 +786,11 @@ Output:"""
             draft_type = "document"
             draft_purpose = question
 
+    lang_name = {"en": "English", "de": "German", "es": "Spanish"}.get(lang, "English")
     draft_prompt = f"""Today is {current_date}.
 {previous_context}
 Write a {draft_type} {draft_purpose} for {USER_NAME}.
+- Write entirely in {lang_name}
 - Professional and well-structured
 - Use [placeholder] for unknown details
 - Concise
@@ -955,7 +957,7 @@ Output:"""
     )
 
 
-def handle_remove_list_item(question: str, extracted: dict, lang: str = "en") -> str:
+def handle_remove_from_list(question: str, extracted: dict, lang: str = "en") -> str:
     """Find and remove a specific item from a list."""
     previous_context = _build_conversation_context()
     all_lists = get_all_lists()
@@ -1046,7 +1048,7 @@ Output:"""
         )
 
     pending_reminder.text = matched['text']
-    pending_reminder.action = "remove_list_item"
+    pending_reminder.action = "remove_from_list"
     pending_reminder.conflict = None
     pending_reminder.line_to_delete = filename
     pending_reminder.event_data = {"filename": filename, "line_index": matched['index']}
@@ -1194,7 +1196,7 @@ def handle_view_reminders(question: str, lang: str = "en") -> str:
         )
 
     format_prompt = f"""{_persona_prompt()}
-
+Today is: {datetime.now().strftime("%A, %B %d, %Y")}
 The user asked: "{question}"
 
 Their reminders:
@@ -1361,7 +1363,7 @@ def handle_confirmation(question: str, lang: str = "en") -> str:
         if action == "save":
             if line_to_delete and conflict in ["duplicate", "conflict"]:
                 delete_reminder_by_line(line_to_delete)
-            save_reminder(reminder_text, due=pending_reminder.due)
+            create_reminder(reminder_text, due=pending_reminder.due)
             ingest_notes()
             pending_reminder.clear()
             return _t(
@@ -1375,9 +1377,9 @@ def handle_confirmation(question: str, lang: str = "en") -> str:
             items = pending_reminder.items or []
             for item in items:
                 if isinstance(item, dict):
-                    save_reminder(item["text"], due=item.get("due"))
+                    create_reminder(item["text"], due=item.get("due"))
                 else:
-                    save_reminder(item)
+                    create_reminder(item)
             ingest_notes()
             pending_reminder.clear()
             count = len(items)
@@ -1471,7 +1473,7 @@ def handle_confirmation(question: str, lang: str = "en") -> str:
                 lang
             )
 
-        elif action == "remove_list_item":
+        elif action == "remove_from_list":
             filename = event_data["filename"]
             line_index = event_data["line_index"]
             delete_list_item(filename, line_index)
@@ -1642,7 +1644,7 @@ def handle_confirmation(question: str, lang: str = "en") -> str:
                 f"¿Añadir {preview} a '{filename}'? Sí o no.",
                 lang
             )
-        elif action == "remove_list_item":
+        elif action == "remove_from_list":
             return _t(
                 f"Remove '{reminder_text}' from the list? Yes or no.",
                 f"'{reminder_text}' von der Liste entfernen? Ja oder Nein.",
@@ -1730,7 +1732,7 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
         return answer
 
     # 4. Dispatch to handler
-    if intent == "save_reminder":
+    if intent == "create_reminder":
         answer = handle_reminder(question, extracted, lang)
     elif intent == "delete_reminder":
         answer = handle_delete(question, extracted, lang)
@@ -1754,8 +1756,8 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
         answer = handle_create_list(question, extracted, lang)
     elif intent == "add_to_list":
         answer = handle_add_to_list(question, extracted, lang)
-    elif intent == "remove_list_item":
-        answer = handle_remove_list_item(question, extracted, lang)
+    elif intent == "remove_from_list":
+        answer = handle_remove_from_list(question, extracted, lang)
     elif intent == "delete_list":
         answer = handle_delete_list(question, extracted, lang)
     else:

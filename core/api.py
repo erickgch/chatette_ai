@@ -122,6 +122,15 @@ def status():
     return {"status": "running", "model": model}
 
 
+@app.post("/clear_context")
+def clear_context():
+    """Reset the in-memory conversation context (last Q&A pair)."""
+    from rag_lw import conversation_context
+    conversation_context["last_question"] = None
+    conversation_context["last_answer"] = None
+    return {"cleared": True}
+
+
 # ===================================
 # Chat
 # ===================================
@@ -206,6 +215,10 @@ def command(request: CommandRequest):
         elif cmd == "delete_event":
             extracted = {"title": payload}
             answer = handle_delete_event(question, extracted, lang)
+
+        elif cmd == "list":
+            from rag_lw import handle_create_list
+            answer = handle_create_list(question, {}, lang)
 
         elif cmd == "delete_list":
             from rag_lw import handle_delete_list
