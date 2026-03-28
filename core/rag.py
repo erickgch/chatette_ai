@@ -5,7 +5,7 @@ from langchain_chroma import Chroma
 from langchain_core.prompts import PromptTemplate
 from ingestion import ingest_notes, ingest_calendar_events, ingest_lists
 from note_manager import (
-    save_reminder, delete_reminder_by_line, get_all_reminders,
+    create_reminder, delete_reminder_by_line, get_all_reminders,
     save_personal_note, save_draft,
     create_list, add_item_to_list, find_list_by_name,
     get_all_lists, delete_list, get_list_items, delete_list_item
@@ -772,7 +772,7 @@ Output:"""
     )
 
 
-def handle_remove_list_item(question: str, lang: str = "en") -> str:
+def handle_remove_from_list(question: str, lang: str = "en") -> str:
     """Find and remove a specific item from a list."""
     previous_context = _build_conversation_context()
     all_lists = get_all_lists()
@@ -849,7 +849,7 @@ Output:"""
 
     pending_reminder.update({
         "text": matched['text'],
-        "action": "remove_list_item",
+        "action": "remove_from_list",
         "conflict": None,
         "line_to_delete": filename,
         "event_data": {"filename": filename, "line_index": matched['index']},
@@ -1016,7 +1016,7 @@ def handle_confirmation(question: str, lang: str = "en") -> str:
         if action == "save":
             if line_to_delete and conflict in ["duplicate", "conflict"]:
                 delete_reminder_by_line(line_to_delete)
-            save_reminder(reminder_text)
+            create_reminder(reminder_text)
             ingest_notes()
             _clear_pending()
             return _t(
@@ -1080,7 +1080,7 @@ def handle_confirmation(question: str, lang: str = "en") -> str:
                 lang
             )
 
-        elif action == "remove_list_item":
+        elif action == "remove_from_list":
             filename = event_data["filename"]
             line_index = event_data["line_index"]
             delete_list_item(filename, line_index)
@@ -1223,7 +1223,7 @@ def handle_confirmation(question: str, lang: str = "en") -> str:
                 f"¿Añadir '{event_data['item']}' a la lista? Sí o no.",
                 lang
             )
-        elif action == "remove_list_item":
+        elif action == "remove_from_list":
             return _t(
                 f"Remove '{reminder_text}' from the list? Yes or no.",
                 f"'{reminder_text}' von der Liste entfernen? Ja oder Nein.",
@@ -1381,7 +1381,7 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
 
     # 13. Remove list item
     if is_list_remove_item_request(question):
-        answer = handle_remove_list_item(question, lang)
+        answer = handle_remove_from_list(question, lang)
         print(f"Chatette: {answer}")
         conversation_context["last_question"] = question
         conversation_context["last_answer"] = answer

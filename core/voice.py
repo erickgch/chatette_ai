@@ -2,11 +2,10 @@ import os
 import subprocess
 import tempfile
 import numpy as np
-import sounddevice as sd
-import soundfile as sf
 from faster_whisper import WhisperModel
 from dotenv import load_dotenv
 from pathlib import Path
+
 # === LISTENING PARAMETERS ===
 SAMPLE_RATE = 16000
 CHUNK_SIZE = 512
@@ -29,6 +28,8 @@ print("✅ Whisper ready!")
 # ===== Speech to Text =====
 def listen() -> str:
     """Record audio until the user stops speaking, then transcribe."""
+    import sounddevice as sd
+    import soundfile as sf
     from silero_vad import load_silero_vad
     import torch
 
@@ -86,6 +87,8 @@ def listen() -> str:
 # ===== Text to Speech =====
 def speak(text: str):
     """Convert text to speech using Piper and play it."""
+    import sounddevice as sd
+    import soundfile as sf
     print(f"🔊 Speaking: {text[:50]}...")
 
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:

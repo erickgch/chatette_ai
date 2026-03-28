@@ -2,7 +2,7 @@ import os
 import re
 from dotenv import load_dotenv
 from pathlib import Path
-from pydantic import BaseModel, field_validator, ValidationError
+from pydantic import BaseModel, ConfigDict, field_validator, ValidationError
 
 # Path to .env file — one level up from core/
 ENV_PATH = Path(__file__).parent.parent / ".env"
@@ -13,6 +13,8 @@ ENV_PATH = Path(__file__).parent.parent / ".env"
 # ==========================
 
 class ChatetteSettings(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     server_url: str
     model_selection: str
     use_groq: bool

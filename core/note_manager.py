@@ -124,7 +124,7 @@ def _write_reminders(items: list[ReminderItem]) -> None:
             f.write(item.model_dump_json() + "\n")
 
 
-def save_reminder(text: str, due: str | None = None) -> None:
+def create_reminder(text: str, due: str | None = None) -> None:
     """Validate and append a reminder to reminders.txt as JSON Lines."""
     try:
         item = ReminderItem(

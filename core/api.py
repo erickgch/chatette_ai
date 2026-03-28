@@ -1,11 +1,12 @@
+import asyncio
 import os
 import re
 import threading
 import tempfile
 import subprocess
 import uvicorn
-import scipy.signal as signal_proc
-import scipy.io.wavfile as wav_io
+import scipy.signal as signal_proc  # type: ignore[import-untyped]
+import scipy.io.wavfile as wav_io  # type: ignore[import-untyped]
 import numpy as np
 from voice import whisper_model
 from fastapi import FastAPI, Form, HTTPException, UploadFile, File
@@ -17,7 +18,8 @@ from dotenv import load_dotenv
 from pathlib import Path
 from fastapi import FastAPI, Form, HTTPException, UploadFile, File, Header
 from scheduler import start_scheduler
-from rag_lw import ask, handle_reminder, handle_calendar_event, handle_delete, handle_delete_event, handle_draft, handle_personal_note, handle_weather
+from rag_lw import ask, handle_reminder, handle_calendar_event, handle_delete, handle_delete_event, handle_draft, handle_personal_note, handle_weather, clear_device_context, clear_device_pending
+import bulb_controller
 from ingestion import (
     ingest_all, ingest_notes, ingest_calendar_events,
     ingest_emails, ingest_lists
@@ -155,19 +157,16 @@ def status():
 
 
 @app.post("/clear_context")
-def clear_context():
-    """Reset the in-memory conversation context (last Q&A pair)."""
-    from rag_lw import conversation_context
-    conversation_context["last_question"] = None
-    conversation_context["last_answer"] = None
+def clear_context(x_device: str = Header("app", alias="X-Device")):
+    """Reset the in-memory conversation context for this device."""
+    clear_device_context(x_device)
     return {"cleared": True}
 
 
 @app.post("/clear_pending")
-def clear_pending():
-    """Discard any pending confirmation state without touching conversation context."""
-    from rag_lw import pending_reminder
-    pending_reminder.clear()
+def clear_pending(x_device: str = Header("app", alias="X-Device")):
+    """Discard pending confirmation state for this device."""
+    clear_device_pending(x_device)
     return {"cleared": True}
 
 
@@ -176,15 +175,15 @@ def clear_pending():
 # ===================================
 
 @app.post("/chat", response_model=AnswerResponse)
-def chat(request: QuestionRequest):
+def chat(request: QuestionRequest, x_device: str = Header("app", alias="X-Device")):
     """Send a text message and get a response."""
-    print(f"📱 Received: question='{request.question}' mode='{request.mode}'")
+    print(f"📱 Received: question='{request.question}' mode='{request.mode}' device='{x_device}'")
     if not request.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty")
     if request.mode not in ["auto", "personal", "general"]:
         raise HTTPException(status_code=400, detail="Mode must be 'auto', 'personal', or 'general'")
     try:
-        answer = ask(request.question, mode=request.mode, lang=request.lang)
+        answer = ask(request.question, mode=request.mode, lang=request.lang, device_id=x_device)
         print(f"✅ Answer: '{answer[:80]}...'")
         return AnswerResponse(question=request.question, answer=answer, mode=request.mode)
     except Exception as e:
@@ -310,14 +309,23 @@ def text_to_speech(request: QuestionRequest):
     return FileResponse(output_path, media_type="audio/wav")
 
 
+_CONFIRM_NEGATIVES = {"no", "nein", "nope", "cancel", "cancelar", "abbrechen"}
+
+# Last spoken language per device — keeps TTS consistent across confirm/cancel button presses
+_device_last_lang: dict[str, str] = {}
+
 _PIPER_VOICE_MAP = {
     "en": None,  # resolved at runtime from PIPER_VOICE env var
     "de": "piper/de_DE-ramona-low.onnx",
+    "es": "piper/es_AR-daniela-high.onnx",
 }
+
+_processing_lock = asyncio.Lock()
 
 _EMPTY_TRANSCRIPT_MSG = {
     "en": "I didn't get that. Can you repeat that?",
     "de": "Das habe ich nicht verstanden. Kannst du das wiederholen?",
+    "es": "No entendí. ¿Puedes repetirlo?",
 }
 
 
@@ -325,29 +333,80 @@ _EMPTY_TRANSCRIPT_MSG = {
 async def voice_chat(
     file: UploadFile = File(...),
     lang: str = Form("en"),
-    x_intent: str = Header(None, alias="X-Intent")
+    x_intent: str = Header(None, alias="X-Intent"),
+    x_device: str = Header("app", alias="X-Device")
 ):
+    if _processing_lock.locked():
+        raise HTTPException(status_code=503, headers={"X-Chatette-Busy": "true"},
+                            detail="Chatette is busy — please try again in a moment.")
+
+    async with _processing_lock:
+        return await _voice_chat_inner(file, lang, x_intent, x_device)
+
+
+async def _voice_chat_inner(file, lang, x_intent, x_device):
     PIPER_PATH = os.getenv("PIPER_PATH")
-    piper_voice = _PIPER_VOICE_MAP.get(lang) or os.getenv("PIPER_VOICE")
 
     # Save uploaded audio
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp.write(await file.read())
         tmp_path = tmp.name
 
-    # Transcribe
-    segments, _ = whisper_model.transcribe(tmp_path)
+    # Transcribe — Whisper also detects the spoken language
+    segments, info = whisper_model.transcribe(
+        tmp_path,
+        initial_prompt="Chatette, turn on the lights, set a reminder, what's the weather, add to my list.",
+    )
     transcript = " ".join([seg.text for seg in segments]).strip()
     os.unlink(tmp_path)
 
+    # Auto-select language from Whisper detection; fall back to client param for silence.
+    spoken_lang = (
+        info.language
+        if (transcript and info.language in _PIPER_VOICE_MAP)
+        else lang
+    )
+
+    # Determine TTS language:
+    # - Verbal requests: trust Whisper detection; store it for later.
+    # - Silent button presses (confirm/cancel): use stored conversational language,
+    #   but allow an explicit LANG button override (non-'en' client lang that differs from stored).
+    if x_intent in ("confirm", "cancel", "bulb_on", "bulb_off"):
+        stored = _device_last_lang.get(x_device)
+        if stored and lang != 'en' and lang != stored and lang in _PIPER_VOICE_MAP:
+            # LANG button was pressed — explicit override
+            tts_lang = lang
+            _device_last_lang[x_device] = lang
+        else:
+            tts_lang = stored or spoken_lang
+    else:
+        tts_lang = spoken_lang
+        _device_last_lang[x_device] = spoken_lang
+
+    piper_voice = _PIPER_VOICE_MAP.get(tts_lang) or os.getenv("PIPER_VOICE")
+
+    # Button-driven intent overrides — bypass transcription entirely.
+    if x_intent == "confirm":
+        normalized = transcript.lower().strip().rstrip(".,!?")
+        if normalized not in _CONFIRM_NEGATIVES:
+            transcript = "yes"
+    elif x_intent == "cancel":
+        transcript = "no"
+    elif x_intent == "bulb_on":
+        transcript = "turn on the lights"
+    elif x_intent == "bulb_off":
+        transcript = "turn off the lights"
+
     if not transcript:
-        answer = _EMPTY_TRANSCRIPT_MSG.get(lang, _EMPTY_TRANSCRIPT_MSG["en"])
+        answer = _EMPTY_TRANSCRIPT_MSG.get(tts_lang, _EMPTY_TRANSCRIPT_MSG["en"])
     else:
         # Get answer — use intent as mode hint if provided
         mode = "auto"
         if x_intent and x_intent not in ("general", "free"):
             mode = x_intent
-        answer = ask(transcript, mode=mode, lang=lang)
+        if mode in ("bulb_on", "bulb_off"):
+            mode = "control_bulbs"
+        answer = ask(transcript, mode=mode, lang=tts_lang, device_id=x_device)
 
     # Generate TTS
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -366,10 +425,16 @@ async def voice_chat(
         data = signal_proc.resample_poly(data, up, down).astype(np.int16)
         wav_io.write(output_path, 48000, data)
 
+    def _safe_header(value: str) -> str:
+        return value.encode("latin-1", errors="replace").decode("latin-1")
+
     return FileResponse(
         output_path,
         media_type="audio/wav",
-        headers={"X-Transcript": transcript, "X-Answer": answer}
+        headers={
+            "X-Transcript": _safe_header(transcript),
+            "X-Answer": _safe_header(answer),
+        }
     )
 
 # ===================================
@@ -595,15 +660,9 @@ def save_settings(request: SettingsRequest):
     if not success:
         raise HTTPException(status_code=500, detail="Failed to save settings")
 
-    def _restart():
-        import time, sys, subprocess
-        time.sleep(3)  # Give the old process time to shut down cleanly
-        print("🔄 Restarting Chatette with new settings...")
-        subprocess.Popen([sys.executable] + sys.argv)
-        sys.exit(0)
-
-    threading.Thread(target=_restart, daemon=True).start()
-    return {"status": "saved", "restarting": True}
+    from rag_lw import reload_llm
+    reload_llm()
+    return {"status": "saved"}
 
 
 # ===================================
@@ -663,6 +722,61 @@ def sync_push(request: SyncPushRequest):
     if any(u in ["reminders", "personal_notes"] for u in result["updated"]):
         ingest_notes()
     return result
+
+
+# ===================================
+# Bulb Control
+# ===================================
+
+class BulbBrightnessRequest(BaseModel):
+    level: int = 50
+
+class BulbColorRequest(BaseModel):
+    hue: int = 240
+
+
+@app.post("/bulb/on")
+def bulb_on():
+    try:
+        bulb_controller.turn_on()
+        return {"status": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.post("/bulb/off")
+def bulb_off():
+    try:
+        bulb_controller.turn_off()
+        return {"status": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.post("/bulb/brightness")
+def bulb_brightness(req: BulbBrightnessRequest):
+    try:
+        bulb_controller.set_brightness(req.level)
+        return {"status": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.post("/bulb/color")
+def bulb_color(req: BulbColorRequest):
+    try:
+        bulb_controller.set_color(req.hue, 100)
+        return {"status": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.get("/bulb/status")
+def bulb_status():
+    try:
+        return bulb_controller.get_status()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 # ===================================
