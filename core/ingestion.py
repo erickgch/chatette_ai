@@ -260,16 +260,17 @@ def ingest_calendar_events():
     documents = []
 
     for event in events:
-        start = human_datetime(event.get("start"))
-        end = human_datetime(event.get("end"))
+        event_dict = event.model_dump() if hasattr(event, "model_dump") else event
+        start = human_datetime(event_dict.get("start"))
+        end = human_datetime(event_dict.get("end"))
 
         text = f"""
 [Calendar Event]
 
-Title: {event.get('title')}
+Title: {event_dict.get('title')}
 Start: {start}
 End: {end}
-Description: {event.get('description', '')}
+Description: {event_dict.get('description', '')}
 """
 
         doc = Document(
@@ -303,18 +304,18 @@ def ingest_emails():
     documents = []
 
     for email in emails:
-        date = human_datetime(email.get("date"))
+        date = human_datetime(email.date)
 
-        body = email.get("body", "")
+        body = email.body
         if body:
             body = body.strip()[:400]
 
         text = f"""
 [Email]
 
-From: {email.get('from')}
+From: {email.from_}
 Date: {date}
-Subject: {email.get('subject')}
+Subject: {email.subject}
 
 Body:
 {body}

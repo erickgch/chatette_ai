@@ -4,12 +4,18 @@ import threading
 import tempfile
 import subprocess
 import uvicorn
-from fastapi import FastAPI, HTTPException, UploadFile, File
+import scipy.signal as signal_proc
+import scipy.io.wavfile as wav_io
+import numpy as np
+from voice import whisper_model
+from fastapi import FastAPI, Form, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict
+from settings_manager import ChatetteSettings
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from pathlib import Path
+from fastapi import FastAPI, Form, HTTPException, UploadFile, File, Header
 from scheduler import start_scheduler
 from rag_lw import ask, handle_reminder, handle_calendar_event, handle_delete, handle_delete_event, handle_draft, handle_personal_note, handle_weather
 from ingestion import (
@@ -72,7 +78,6 @@ class SettingsRequest(BaseModel):
     email_days_window: int
     calendar_days_ahead: int
     calendar_days_behind: int
-    delete_event_days_ahead: int = 60
 
 class ReminderResponse(BaseModel):
     index: int
@@ -83,6 +88,13 @@ class ReminderResponse(BaseModel):
 class RemindersListResponse(BaseModel):
     reminders: list[ReminderResponse]
 
+class FileMeta(BaseModel):
+    filename: str
+    modified: str
+
+class ListsResponse(BaseModel):
+    lists: list[FileMeta]
+
 class ListItemResponse(BaseModel):
     index: int
     text: str
@@ -91,6 +103,26 @@ class ListItemResponse(BaseModel):
 class ListDetailResponse(BaseModel):
     content: str
     items: list[ListItemResponse]
+
+class DraftsResponse(BaseModel):
+    drafts: list[FileMeta]
+
+class ContentResponse(BaseModel):
+    content: str
+
+class SyncFilePayload(BaseModel):
+    content: str = ""
+    modified: str = ""
+
+class SyncListPayload(BaseModel):
+    filename: str
+    content: str
+    modified: str = ""
+
+class SyncPushResponse(BaseModel):
+    updated: list[str]
+    conflict_files: list[str] = []
+    synced_at: str
 
 # SyncPullResponse: model defined but not yet wired to /sync/pull —
 # wiring it requires restructuring build_pull_response() and updating
@@ -128,6 +160,14 @@ def clear_context():
     from rag_lw import conversation_context
     conversation_context["last_question"] = None
     conversation_context["last_answer"] = None
+    return {"cleared": True}
+
+
+@app.post("/clear_pending")
+def clear_pending():
+    """Discard any pending confirmation state without touching conversation context."""
+    from rag_lw import pending_reminder
+    pending_reminder.clear()
     return {"cleared": True}
 
 
@@ -270,32 +310,67 @@ def text_to_speech(request: QuestionRequest):
     return FileResponse(output_path, media_type="audio/wav")
 
 
-@app.post("/voice/chat")
-async def voice_chat(file: UploadFile = File(...)):
-    """Full voice pipeline: audio in → text → RAG → audio out."""
-    from voice import whisper_model
-    PIPER_PATH = os.getenv("PIPER_PATH")
-    PIPER_VOICE = os.getenv("PIPER_VOICE")
+_PIPER_VOICE_MAP = {
+    "en": None,  # resolved at runtime from PIPER_VOICE env var
+    "de": "piper/de_DE-ramona-low.onnx",
+}
 
+_EMPTY_TRANSCRIPT_MSG = {
+    "en": "I didn't get that. Can you repeat that?",
+    "de": "Das habe ich nicht verstanden. Kannst du das wiederholen?",
+}
+
+
+@app.post("/voice/chat")
+async def voice_chat(
+    file: UploadFile = File(...),
+    lang: str = Form("en"),
+    x_intent: str = Header(None, alias="X-Intent")
+):
+    PIPER_PATH = os.getenv("PIPER_PATH")
+    piper_voice = _PIPER_VOICE_MAP.get(lang) or os.getenv("PIPER_VOICE")
+
+    # Save uploaded audio
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp.write(await file.read())
         tmp_path = tmp.name
+
+    # Transcribe
     segments, _ = whisper_model.transcribe(tmp_path)
     transcript = " ".join([seg.text for seg in segments]).strip()
     os.unlink(tmp_path)
 
-    answer = ask(transcript)
+    if not transcript:
+        answer = _EMPTY_TRANSCRIPT_MSG.get(lang, _EMPTY_TRANSCRIPT_MSG["en"])
+    else:
+        # Get answer — use intent as mode hint if provided
+        mode = "auto"
+        if x_intent and x_intent not in ("general", "free"):
+            mode = x_intent
+        answer = ask(transcript, mode=mode, lang=lang)
 
+    # Generate TTS
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         output_path = tmp.name
     subprocess.run(
-        [PIPER_PATH, "--model", PIPER_VOICE, "--output_file", output_path],
+        [PIPER_PATH, "--model", piper_voice, "--length-scale", "1.2", "--output_file", output_path],
         input=answer.encode("utf-8"),
         check=True
     )
-    return FileResponse(output_path, media_type="audio/wav",
-                        headers={"X-Transcript": transcript, "X-Answer": answer})
 
+    # Resample to 48000Hz for Pi
+    rate, data = wav_io.read(output_path)
+    if rate != 48000:
+        up = 48000 // np.gcd(48000, rate)
+        down = rate // np.gcd(48000, rate)
+        data = signal_proc.resample_poly(data, up, down).astype(np.int16)
+        wav_io.write(output_path, 48000, data)
+
+    return FileResponse(
+        output_path,
+        media_type="audio/wav",
+        headers={"X-Transcript": transcript, "X-Answer": answer}
+    )
 
 # ===================================
 # Ingestion
@@ -353,7 +428,7 @@ def delete_reminder_line(index: int):
 # Personal Notes
 # ===================================
 
-@app.get("/personal-notes")
+@app.get("/personal-notes", response_model=ContentResponse)
 def get_personal_notes():
     """Get personal notes content."""
     from note_manager import get_all_personal_notes
@@ -380,13 +455,13 @@ def delete_personal_notes_endpoint():
 # Drafts
 # ===================================
 
-@app.get("/drafts")
+@app.get("/drafts", response_model=DraftsResponse)
 def get_drafts():
     """List all saved drafts."""
     from note_manager import get_all_drafts
     return {"drafts": get_all_drafts()}
 
-@app.get("/drafts/{filename}")
+@app.get("/drafts/{filename}", response_model=ContentResponse)
 def get_draft(filename: str):
     """Get content of a specific draft."""
     from note_manager import get_draft_content
@@ -417,7 +492,7 @@ def delete_draft_endpoint(filename: str):
 # Lists
 # ===================================
 
-@app.get("/lists")
+@app.get("/lists", response_model=ListsResponse)
 def get_lists():
     """List all lists."""
     from note_manager import get_all_lists
@@ -495,7 +570,7 @@ def delete_list_item_endpoint(filename: str, line_index: int):
 # Settings
 # ===================================
 
-@app.get("/settings")
+@app.get("/settings", response_model=ChatetteSettings)
 def get_settings():
     """Return current settings."""
     from settings_manager import read_settings
@@ -560,9 +635,9 @@ def get_notifications_cache():
 # ===================================
 
 class SyncPushRequest(BaseModel):
-    reminders: dict = {}
-    personal_notes: dict = {}
-    lists: list = []
+    reminders: SyncFilePayload = SyncFilePayload()
+    personal_notes: SyncFilePayload = SyncFilePayload()
+    lists: list[SyncListPayload] = []
 
 
 @app.get("/sync/pull")
@@ -572,15 +647,15 @@ def sync_pull():
     return build_pull_response()
 
 
-@app.post("/sync/push")
+@app.post("/sync/push", response_model=SyncPushResponse)
 def sync_push(request: SyncPushRequest):
     """Receive phone changes and apply to PC files."""
     from sync_manager import apply_push
     from ingestion import ingest_notes, ingest_lists
     result = apply_push({
-        "reminders": request.reminders,
-        "personal_notes": request.personal_notes,
-        "lists": request.lists
+        "reminders": request.reminders.model_dump(),
+        "personal_notes": request.personal_notes.model_dump(),
+        "lists": [item.model_dump() for item in request.lists],
     })
     # Re-ingest anything that changed
     if any("list" in u for u in result["updated"]):
