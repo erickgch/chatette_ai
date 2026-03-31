@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import threading
 from contextvars import ContextVar
 from pathlib import Path
 from dotenv import load_dotenv
@@ -9,6 +10,7 @@ from langchain_chroma import Chroma
 from langchain_core.prompts import PromptTemplate
 from ingestion import ingest_notes, ingest_calendar_events, ingest_lists
 import bulb_controller
+from chatette_tv import cast_manager as _cast_manager, channel_registry as _channel_registry, youtube_search as _yt_search
 from note_manager import (
     create_reminder, delete_reminder_by_line, get_all_reminders,
     save_personal_note, save_draft,
@@ -123,6 +125,9 @@ class RateLimitError(Exception):
 # TRANSLATION HELPER
 # ===================================
 
+_LANG_NAMES = {"en": "English", "de": "German", "es": "Spanish"}
+
+
 def _t(en: str, de: str, es: str, lang: str) -> str:
     """Return the right translation based on language code."""
     if lang == "de":
@@ -145,34 +150,52 @@ _TZ_ABBREVS = {
 }
 
 
-def _fmt_due(date_str: str | None) -> str:
-    """Convert YYYY-MM-DD → DD-MM-YYYY for display. Returns original on failure."""
+_MONTHS = {
+    'en': ['January','February','March','April','May','June',
+           'July','August','September','October','November','December'],
+    'de': ['Januar','Februar','März','April','Mai','Juni',
+           'Juli','August','September','Oktober','November','Dezember'],
+    'es': ['enero','febrero','marzo','abril','mayo','junio',
+           'julio','agosto','septiembre','octubre','noviembre','diciembre'],
+}
+
+def _ordinal_en(n: int) -> str:
+    if 11 <= n % 100 <= 13:
+        return f"{n}th"
+    return f"{n}{['th','st','nd','rd','th'][min(n % 10, 4)]}"
+
+
+def _fmt_due(date_str: str | None, lang: str = "en") -> str:
+    """Convert YYYY-MM-DD → spoken date string for TTS (e.g. 'the 30th of March, 2026')."""
     if not date_str:
         return ""
     try:
         d = datetime.strptime(date_str, "%Y-%m-%d")
-        return d.strftime("%d-%m-%Y")
+        month = _MONTHS.get(lang, _MONTHS['en'])[d.month - 1]
+        if lang == "de":
+            return f"dem {d.day}. {month} {d.year}"
+        elif lang == "es":
+            return f"el {d.day} de {month} de {d.year}"
+        else:
+            return f"the {_ordinal_en(d.day)} of {month}, {d.year}"
     except Exception:
         return date_str
 
 
 def _fmt_event_dt(iso: str | None, lang: str = "en") -> str:
-    """Convert ISO datetime → human-readable string with language-aware time phrase."""
+    """Convert ISO datetime → spoken date+time string for TTS."""
     if not iso:
         return ""
     try:
         dt = datetime.fromisoformat(iso)
-        date_part = dt.strftime("%d-%m-%Y")
+        month = _MONTHS.get(lang, _MONTHS['en'])[dt.month - 1]
         time_part = dt.strftime("%H:%M")
-        tz_raw = dt.strftime("%Z")
-        tz = _TZ_ABBREVS.get(tz_raw, tz_raw)
-        tz_suffix = f" {tz}" if tz else ""
         if lang == "de":
-            return f"{date_part} um {time_part} Uhr{tz_suffix}"
+            return f"{dt.day}. {month} {dt.year} um {time_part} Uhr"
         elif lang == "es":
-            return f"{date_part} a las {time_part}h{tz_suffix}"
+            return f"el {dt.day} de {month} de {dt.year} a las {time_part}h"
         else:
-            return f"{date_part} at {time_part}{tz_suffix}"
+            return f"{month} {_ordinal_en(dt.day)}, {dt.year} at {time_part}"
     except Exception:
         return iso
 
@@ -192,11 +215,11 @@ Your personality:
 - Very rarely, a subtle cat hint slips through — natural, never cheesy.
 - Never over-explain or pad responses with unnecessary pleasantries.
 - Never apologize unnecessarily.
-- Always respond in the same language the user used."""
+- Always respond in {lang_name}."""
 
 CHATETTE_RULES = """
 STRICT RULES:
-- Only answer what was specifically asked. Nothing more.
+- Only answer what was specifically asked. Nothing more. Do not make additional comments.
 - Keep answers to 1-2 sentences maximum.
 - Never calculate days of the week from memory — derive them from the current date in context.
 - Always respond in the same language of the QUESTION, not the context.
@@ -266,6 +289,10 @@ def clear_device_pending(device_id: str) -> None:
         _pending_state[device_id].clear()
 
 
+def device_has_pending(device_id: str) -> bool:
+    return device_id in _pending_state and _pending_state[device_id].action is not None
+
+
 # ===================================
 # PYDANTIC MODELS
 # ===================================
@@ -288,6 +315,12 @@ VALID_INTENTS = [
     "get_weather",
     "about_chatette",
     "control_bulbs",
+    "set_alarm",
+    "cast_youtube",
+    "cast_channel",
+    "cast_tv_power",
+    "cast_volume",
+    "cast_stop",
     "general",
 ]
 
@@ -417,12 +450,18 @@ Valid intents:
 - get_weather: user wants weather info (e.g. "what's the weather?", "will it rain today?", "forecast for Berlin")
 - about_chatette: user is asking about Chatette (e.g. "who are you?", "what can you do?")
 - control_bulbs: user wants to control a smart light bulb (e.g. "turn on the lights", "dim to 50%", "set color to blue", "red lights on", "turn off the lamp")
+- set_alarm: user wants to set a countdown timer ("set a timer for 10 minutes", "remind me in 30 seconds") OR an alarm at a specific time ("set an alarm for 7 AM", "wake me up at 6:30", "alarm at 20:00")
+- cast_youtube: user wants to play a YouTube video on TV ("play Bonobo on YouTube", "put on some jazz on the TV", "cast this to the TV")
+- cast_channel: user wants to watch a live TV channel ("put on France24", "open Arte", "switch to DW", "I want to watch ARD", "turn on Euronews", "put on ZDF")
+- cast_tv_power: user wants to turn the TV on or off ("turn on the TV", "turn off the TV", "switch the TV off")
+- cast_volume: user wants to change TV volume ("volume up", "volume down", "set volume to 40", "louder", "quieter", "mute")
+- cast_stop: user wants to stop TV playback ("stop the TV", "pause the TV", "stop casting")
 - general: anything else — general questions, conversation, advice
 
 For the extracted field, include only what is relevant.
 IMPORTANT: If the user mentions multiple items of the same type, extract ALL of them as an array.
 
-- create_reminder: {{"items": ["reminder 1", "reminder 2", ...]}} — ALWAYS use items array, even for one item
+- create_reminder: {{"items": ["reminder text with any date/time kept inside", ...]}} — ALWAYS use items array; KEEP all date/time expressions inside each item (e.g. "Pay photographer tomorrow", never strip dates out)
 - delete_reminder: {{"text": "the reminder description"}}
 - create_event: {{"events": [{{"title": "...", "description": "..."}}, ...]}} — ALWAYS use events array, even for one event
 - delete_event: {{"title": "event title"}}
@@ -435,11 +474,23 @@ IMPORTANT: If the user mentions multiple items of the same type, extract ALL of 
 - get_weather: {{"city": "city name or empty for home", "timeframe": "now|today|tomorrow|week"}}
 - view_emails: {{"max_results": 5}} — optional, default 5
 - control_bulbs: {{}}
+- set_alarm: for a countdown use {{"seconds": <total seconds>}}; for a specific time use {{"hour": <0-23>, "minute": <0-59>}}
+- cast_youtube: {{"query": "search query string"}}
+- cast_channel: {{"channel": "ard"|"arte"|"france24"|"dw"|"euronews"|"zdf"}}
+- cast_tv_power: {{"action": "on"|"off"}}
+- cast_volume: {{"level": 0-100}} for absolute, or {{"delta": -100 to 100}} for relative (e.g. "louder" → +10, "quieter" → -10)
+- cast_stop: {{}}
 - view_reminders / view_events / view_agenda / about_chatette / general: {{}}
 
 Examples of multi-item extraction:
 User: "remind me to buy flowers, call mom and visit uncle"
 → {{"items": ["Buy flowers", "Call mom", "Visit uncle"]}}
+
+User: "save reminder due tomorrow 'transfer 120 euros to photographer'"
+→ {{"items": ["Transfer 120 euros to photographer tomorrow"]}}
+
+User: "remind me on Friday to send the invoice"
+→ {{"items": ["Send the invoice on Friday"]}}
 
 User: "add milk, eggs and bread to my shopping list"
 → {{"items": ["Milk", "Eggs", "Bread"], "list_name": "shopping"}}
@@ -489,11 +540,12 @@ def _build_conversation_context() -> str:
     return ""
 
 
-def _persona_prompt() -> str:
+def _persona_prompt(lang: str = "en") -> str:
     """Return the base persona prompt with user info filled in."""
     return CHATETTE_PERSONA.format(
         user_name=USER_NAME,
-        user_profile=USER_PROFILE
+        user_profile=USER_PROFILE,
+        lang_name=_LANG_NAMES.get(lang, "English")
     )
 
 
@@ -648,7 +700,7 @@ Reply with one of:
         _pending().line_to_delete = None
         _pending().due = due_date
         _pending().lang = lang
-        due_hint = f" (due {_fmt_due(due_date)})" if due_date else ""
+        due_hint = f" (due {_fmt_due(due_date, lang)})" if due_date else ""
         return _t(
             f"Just to confirm — save this to reminders: '{reminder_text}'{due_hint}?",
             f"Zur Bestätigung — in die Erinnerungen speichern: '{reminder_text}'{due_hint}?",
@@ -657,7 +709,7 @@ Reply with one of:
         )
 
     preview = "\n".join(
-        f"  • {d['text']}" + (f" (due {_fmt_due(d['due'])})" if d.get("due") else "")
+        f"  • {d['text']}" + (f" (due {_fmt_due(d['due'], lang)})" if d.get("due") else "")
         for d in due_items
     )
     _pending().text = None
@@ -1307,7 +1359,7 @@ def handle_view_reminders(question: str, lang: str = "en") -> str:
             lang
         )
 
-    format_prompt = f"""{_persona_prompt()}
+    format_prompt = f"""{_persona_prompt(lang)}
 Today is: {datetime.now().strftime("%A, %B %d, %Y")}
 The user asked: "{question}"
 
@@ -1315,7 +1367,7 @@ Their reminders:
 {reminders}
 
 Present these in a friendly, natural way — warm but concise.
-Respond in the same language the user used."""
+Respond in {_LANG_NAMES.get(lang, 'English')}."""
 
     return llm_invoke(format_prompt).strip()
 
@@ -1369,14 +1421,14 @@ def handle_view_events(question: str, lang: str = "en") -> str:
             lines.append(f"- {e.title} on {e.start}")
         events_context = f"Today is: {current_date}\n\nUpcoming events:\n" + "\n".join(lines)
 
-    format_prompt = f"""{_persona_prompt()}
+    format_prompt = f"""{_persona_prompt(lang)}
 
 The user asked: "{question}"
 
 {events_context}
 
 List the relevant upcoming events in a friendly, natural way.
-Respond in the same language the user used.
+Respond in {_LANG_NAMES.get(lang, 'English')}.
 Keep it concise — 1 to 4 events max, summarise the rest if there are more."""
 
     return llm_invoke(format_prompt).strip()
@@ -1434,7 +1486,7 @@ def handle_view_agenda(question: str, lang: str = "en") -> str:
 
     combined = "\n\n".join(sections)
 
-    prompt = f"""{_persona_prompt()}
+    prompt = f"""{_persona_prompt(lang)}
 Today is {current_date}.
 
 The user asked: "{question}"
@@ -1444,10 +1496,151 @@ Here is their current agenda:
 
 Give a brief, natural overview — what's coming up, what to keep in mind.
 Highlight anything time-sensitive or important.
-Respond in the same language the user used.
+Respond in {_LANG_NAMES.get(lang, 'English')}.
 Keep it concise — a few sentences at most."""
 
     return llm_invoke(prompt).strip()
+
+
+# ── Chatette TV handlers ──────────────────────────────────────────────────────
+
+_CHANNEL_DISPLAY = {
+    "ard": "ARD", "arte": "Arte", "france24": "France 24",
+    "dw": "DW", "euronews": "Euronews",
+}
+
+
+def handle_cast_tv_power(_question: str, extracted: dict, lang: str = "en") -> str:
+    action = extracted.get("action", "on")
+    ok = _cast_manager.power_on() if action == "on" else _cast_manager.power_off()
+    if not ok:
+        return _t("I couldn't reach the TV.", "Ich konnte den Fernseher nicht erreichen.", "No pude conectar con el televisor.", lang)
+    if action == "on":
+        return _t("TV is on.", "Fernseher eingeschaltet.", "Televisor encendido.", lang)
+    return _t("TV is off.", "Fernseher ausgeschaltet.", "Televisor apagado.", lang)
+
+
+def handle_cast_volume(_question: str, extracted: dict, lang: str = "en") -> str:
+    level = extracted.get("level")
+    delta = extracted.get("delta")
+    if level is not None:
+        new = _cast_manager.set_volume(int(level))
+    elif delta is not None:
+        new = _cast_manager.volume_delta(int(delta))
+    else:
+        # Infer from question keywords
+        q = _question.lower()
+        if any(w in q for w in ("louder", "up", "lauter", "hoch", "más alto", "subir")):
+            new = _cast_manager.volume_delta(10)
+        elif any(w in q for w in ("quieter", "down", "leiser", "runter", "bajar", "menos")):
+            new = _cast_manager.volume_delta(-10)
+        else:
+            new = _cast_manager.volume_delta(10)
+    if new < 0:
+        return _t("I couldn't reach the TV.", "Ich konnte den Fernseher nicht erreichen.", "No pude conectar con el televisor.", lang)
+    return _t(f"Volume set to {new}%.", f"Lautstärke auf {new}% gesetzt.", f"Volumen al {new}%.", lang)
+
+
+def handle_cast_youtube(_question: str, extracted: dict, lang: str = "en") -> str:
+    if not _yt_search.is_available():
+        if not _yt_search.YOUTUBE_API_KEY:
+            return _t("YouTube search is not configured.", "YouTube-Suche ist nicht konfiguriert.", "La búsqueda de YouTube no está configurada.", lang)
+        return _t("YouTube search is unavailable for today — the daily quota has been reached.", "Die YouTube-Suche ist heute nicht verfügbar — das Tageslimit wurde erreicht.", "La búsqueda de YouTube no está disponible hoy — se alcanzó el límite diario.", lang)
+    query = extracted.get("query", _question)
+    result = _yt_search.search_video(query)
+    if result is None:
+        if _yt_search._quota_exceeded:
+            return _t("YouTube search is unavailable for today — the daily quota has been reached.", "Die YouTube-Suche ist heute nicht verfügbar — das Tageslimit wurde erreicht.", "La búsqueda de YouTube no está disponible hoy — se alcanzó el límite diario.", lang)
+        return _t("I couldn't find that on YouTube.", "Ich konnte das auf YouTube nicht finden.", "No encontré eso en YouTube.", lang)
+    video_id, title = result
+    ok = _cast_manager.play_youtube(video_id)
+    if not ok:
+        return _t("I couldn't reach the TV.", "Ich konnte den Fernseher nicht erreichen.", "No pude conectar con el televisor.", lang)
+    return _t(f"Casting '{title}'.", f"Ich spiele '{title}'.", f"Reproduciendo '{title}'.", lang)
+
+
+def handle_cast_channel(_question: str, extracted: dict, lang: str = "en") -> str:
+    channel = extracted.get("channel", "")
+    url = _channel_registry.get_url(channel)
+    if not url:
+        return _t(f"I don't have a stream for {channel}.", f"Ich habe keinen Stream für {channel}.", f"No tengo stream para {channel}.", lang)
+    name = _CHANNEL_DISPLAY.get(channel, channel)
+    ok = _cast_manager.play_hls(url, title=name)
+    if not ok:
+        return _t("I couldn't reach the TV.", "Ich konnte den Fernseher nicht erreichen.", "No pude conectar con el televisor.", lang)
+    return _t(f"Opening {name}.", f"Ich öffne {name}.", f"Abriendo {name}.", lang)
+
+
+def handle_cast_stop(_question: str, lang: str = "en") -> str:
+    ok = _cast_manager.stop()
+    if not ok:
+        return _t("I couldn't reach the TV.", "Ich konnte den Fernseher nicht erreichen.", "No pude conectar con el televisor.", lang)
+    return _t("Playback stopped.", "Wiedergabe gestoppt.", "Reproducción detenida.", lang)
+
+
+# ── Timer / alarm thread-local (read by api.py after ask()) ──────────────────
+_tl = threading.local()
+
+def _clear_alarm_state():
+    _tl.timer_seconds = None
+    _tl.alarm_time    = None
+
+def get_last_alarm():
+    return {
+        'seconds':    getattr(_tl, 'timer_seconds', None),
+        'alarm_time': getattr(_tl, 'alarm_time',    None),
+    }
+
+
+def handle_set_alarm(_question: str, extracted: dict, lang: str = "en") -> str:
+    """Handle set_alarm intent — covers both countdowns and wall-clock alarms."""
+    _clear_alarm_state()
+
+    seconds    = extracted.get('seconds')
+    hour       = extracted.get('hour')
+    minute     = extracted.get('minute', 0)
+
+    if seconds is not None:
+        # Countdown timer
+        secs = int(seconds)
+        if secs <= 0:
+            return _t("I didn't catch the duration — how long should the timer run?",
+                      "Ich habe die Dauer nicht verstanden — wie lange soll der Timer laufen?",
+                      "No escuché la duración — ¿cuánto tiempo debe durar el temporizador?",
+                      lang)
+        _tl.timer_seconds = secs
+        mm, ss = divmod(secs, 60)
+        hh, mm = divmod(mm, 60)
+        parts = []
+        if hh: parts.append({"en": f"{hh}h", "de": f"{hh} Std.", "es": f"{hh}h"}[lang])
+        if mm: parts.append({"en": f"{mm} minutes", "de": f"{mm} Minuten", "es": f"{mm} minutos"}[lang])
+        if ss: parts.append({"en": f"{ss} seconds", "de": f"{ss} Sekunden", "es": f"{ss} segundos"}[lang])
+        time_str = " ".join(parts) or "0s"
+        return _t(f"Timer set for {time_str} from now.",
+                  f"Timer auf {time_str} ab jetzt gestellt.",
+                  f"Temporizador de {time_str} a partir de ahora.",
+                  lang)
+
+    elif hour is not None:
+        # Wall-clock alarm
+        hh, mm = int(hour), int(minute)
+        if hh > 23 or mm > 59:
+            return _t("That doesn't look like a valid time.",
+                      "Das scheint keine gültige Uhrzeit zu sein.",
+                      "Eso no parece una hora válida.",
+                      lang)
+        _tl.alarm_time = (hh, mm)
+        time_str = f"{hh:02d}:{mm:02d}"
+        return _t(f"Alarm set at {time_str}.",
+                  f"Wecker gestellt auf {time_str} Uhr.",
+                  f"Alarma programada a las {time_str}.",
+                  lang)
+
+    else:
+        return _t("I didn't catch the time — please try again.",
+                  "Ich habe die Zeit nicht verstanden — bitte versuche es erneut.",
+                  "No escuché la hora — por favor inténtalo de nuevo.",
+                  lang)
 
 
 def handle_view_emails(question: str, extracted: dict, lang: str = "en") -> str:
@@ -1497,14 +1690,14 @@ def handle_view_emails(question: str, extracted: dict, lang: str = "en") -> str:
         ]
         emails_context = f"Today is: {current_date}\n\nRecent emails:\n" + "\n".join(lines)
 
-    format_prompt = f"""{_persona_prompt()}
+    format_prompt = f"""{_persona_prompt(lang)}
 
 The user asked: "{question}"
 
 {emails_context}
 
 Summarise the relevant emails in a friendly, natural way.
-Respond in the same language the user used.
+Respond in {_LANG_NAMES.get(lang, 'English')}.
 Keep it concise — highlight sender and subject, mention body only if relevant."""
 
     return llm_invoke(format_prompt).strip()
@@ -1555,7 +1748,7 @@ def handle_weather(question: str, extracted: dict, lang: str = "en") -> str:
             lang
         )
 
-    weather_prompt = f"""{_persona_prompt()}
+    weather_prompt = f"""{_persona_prompt(lang)}
 
 The user asked: "{question}"
 
@@ -1564,7 +1757,7 @@ Here is the current weather data:
 
 Respond naturally in Chatette's voice — warm, concise, useful.
 Highlight the most important things (temperature, rain, wind if notable). Don't be too technical.
-Respond in the same language the user used.
+Respond in {_LANG_NAMES.get(lang, 'English')}.
 Keep it to 2-3 sentences maximum."""
 
     return llm_invoke(weather_prompt).strip()
@@ -1573,10 +1766,10 @@ Keep it to 2-3 sentences maximum."""
 def handle_about_chatette(question: str, lang: str = "en") -> str:
     """Answer questions about Chatette."""
     about_prompt = (
-        f"{_persona_prompt()}\n\n"
+        f"{_persona_prompt(lang)}\n\n"
         f"{_build_conversation_context()}"
         f"Answer naturally in 1-2 sentences.\n"
-        f"Always respond in the same language the user used.\n\n"
+        f"Always respond in {_LANG_NAMES.get(lang, 'English')}.\n\n"
         f"Question: {question}\n"
         f"Chatette:"
     )
@@ -2055,6 +2248,18 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
     confidence = classification.confidence
     extracted = classification.extracted
 
+    # 2b. Phone shortcut hard-override — trust the key press, not the LLM classification.
+    # Extraction still ran above so handler-specific data (text, title, etc.) is available.
+    # Key 0 ('general'/'free') is intentionally excluded — it defers to LLM classification.
+    # LLM capabilities are limited in the phone, but the goal is intended for quick actions.
+    _PHONE_INTENTS = {
+        "create_reminder", "create_event", "create_draft", "get_weather",
+        "create_list", "view_agenda", "view_emails", "set_alarm",
+    }
+    if mode in _PHONE_INTENTS:
+        intent = mode
+        confidence = "high"
+
     # 3. Low confidence on action intents → ask for clarification
     if confidence == "low" and intent != "general":
         answer = _t(
@@ -2103,6 +2308,18 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
         answer = handle_remove_from_list(question, extracted, lang)
     elif intent == "delete_list":
         answer = handle_delete_list(question, extracted, lang)
+    elif intent == "set_alarm":
+        answer = handle_set_alarm(question, extracted, lang)
+    elif intent == "cast_tv_power":
+        answer = handle_cast_tv_power(question, extracted, lang)
+    elif intent == "cast_volume":
+        answer = handle_cast_volume(question, extracted, lang)
+    elif intent == "cast_youtube":
+        answer = handle_cast_youtube(question, extracted, lang)
+    elif intent == "cast_channel":
+        answer = handle_cast_channel(question, extracted, lang)
+    elif intent == "cast_stop":
+        answer = handle_cast_stop(question, lang)
     else:
         answer = _handle_general(question, mode, lang)
 
@@ -2116,10 +2333,10 @@ def _handle_general(question: str, mode: str, lang: str) -> str:
     """Handle general questions via RAG or pure LLM."""
 
     _general_prompt_base = (
-        f"{_persona_prompt()}\n\n"
+        f"{_persona_prompt(lang)}\n\n"
         f"{_build_conversation_context()}"
         f"Answer the following question in 1-2 sentences.\n"
-        f"- Always respond in the same language the user used.\n"
+        f"- Always respond in {_LANG_NAMES.get(lang, 'English')}.\n"
         f"- If the question refers to the previous exchange, use it.\n\n"
         f"Question: {{question}}\n"
         f"Chatette:"
@@ -2131,7 +2348,7 @@ def _handle_general(question: str, mode: str, lang: str) -> str:
 
     if mode == "personal":
         print("Mode: personal/RAG")
-        return _rag_query(question, k_emails=7, k_other=5)
+        return _rag_query(question, k_emails=7, k_other=5, lang=lang)
 
     all_docs = []
     best_score = float("inf")
@@ -2157,11 +2374,11 @@ def _handle_general(question: str, mode: str, lang: str) -> str:
         print("Using general knowledge...")
         return llm_invoke(_general_prompt_base.format(question=question)).strip()
 
-    return _rag_query(question, k_emails=7, k_other=5, docs=all_docs)
+    return _rag_query(question, k_emails=7, k_other=5, docs=all_docs, lang=lang)
 
 
 def _rag_query(question: str, k_emails: int = 7, k_other: int = 5,
-               docs: list = None) -> str:
+               docs: list = None, lang: str = "en") -> str:
     """Run RAG query with provided or freshly retrieved docs."""
     if docs is None:
         docs = []
@@ -2195,7 +2412,8 @@ The day after tomorrow is: {day_after}
 
     formatted_prompt = prompt_template.format(
         context=context, question=question,
-        user_name=USER_NAME, user_profile=USER_PROFILE
+        user_name=USER_NAME, user_profile=USER_PROFILE,
+        lang_name=_LANG_NAMES.get(lang, "English")
     )
     return llm_invoke(formatted_prompt).strip()
 

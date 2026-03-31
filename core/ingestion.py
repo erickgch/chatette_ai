@@ -189,7 +189,7 @@ def ingest_notes():
         return
 
     for file in notes_path.iterdir():
-        if file.is_file():
+        if file.is_file() and file.suffix in ('.txt', '.md'):
             ingest_file(str(file), collection="notes")
 
     drafts_path = notes_path / "drafts"

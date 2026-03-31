@@ -16,16 +16,20 @@ from settings_manager import ChatetteSettings
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from pathlib import Path
+
+# Load .env before importing any module that reads env vars at import time (e.g. chromadb telemetry)
+load_dotenv(Path(__file__).parent.parent / ".env")
+
 from fastapi import FastAPI, Form, HTTPException, UploadFile, File, Header
 from scheduler import start_scheduler
-from rag_lw import ask, handle_reminder, handle_calendar_event, handle_delete, handle_delete_event, handle_draft, handle_personal_note, handle_weather, clear_device_context, clear_device_pending
+from rag_lw import ask, handle_reminder, handle_calendar_event, handle_delete, handle_delete_event, handle_draft, handle_personal_note, handle_weather, clear_device_context, clear_device_pending, device_has_pending, handle_set_alarm, get_last_alarm
 import bulb_controller
+from chatette_tv import channel_registry as _channel_registry
+from chatette_tv.cast_router import router as cast_router
 from ingestion import (
     ingest_all, ingest_notes, ingest_calendar_events,
     ingest_emails, ingest_lists
 )
-
-load_dotenv(Path(__file__).parent.parent / ".env")
 
 
 # ===================================
@@ -37,6 +41,7 @@ async def lifespan(app: FastAPI):
     scheduler_thread = threading.Thread(target=start_scheduler, daemon=True)
     scheduler_thread.start()
     print("🚀 Scheduler started in background")
+    _channel_registry.init()
     yield
     print("🛑 Shutting down...")
 
@@ -47,6 +52,7 @@ app = FastAPI(
     version="4.0.0",
     lifespan=lifespan
 )
+app.include_router(cast_router, prefix="/cast")
 
 
 # ===================================
@@ -316,7 +322,7 @@ _device_last_lang: dict[str, str] = {}
 
 _PIPER_VOICE_MAP = {
     "en": None,  # resolved at runtime from PIPER_VOICE env var
-    "de": "piper/de_DE-ramona-low.onnx",
+    "de": "piper/de_DE-kerstin-low.onnx",
     "es": "piper/es_AR-daniela-high.onnx",
 }
 
@@ -334,17 +340,21 @@ async def voice_chat(
     file: UploadFile = File(...),
     lang: str = Form("en"),
     x_intent: str = Header(None, alias="X-Intent"),
-    x_device: str = Header("app", alias="X-Device")
+    x_device: str = Header("app", alias="X-Device"),
+    x_timer_seconds: str = Header(None, alias="X-Timer-Seconds"),
+    x_alarm_time:    str = Header(None, alias="X-Alarm-Time"),
 ):
     if _processing_lock.locked():
         raise HTTPException(status_code=503, headers={"X-Chatette-Busy": "true"},
                             detail="Chatette is busy — please try again in a moment.")
 
     async with _processing_lock:
-        return await _voice_chat_inner(file, lang, x_intent, x_device)
+        return await _voice_chat_inner(
+            file, lang, x_intent, x_device, x_timer_seconds, x_alarm_time)
 
 
-async def _voice_chat_inner(file, lang, x_intent, x_device):
+async def _voice_chat_inner(file, lang, x_intent, x_device,
+                             x_timer_seconds=None, x_alarm_time=None):
     PIPER_PATH = os.getenv("PIPER_PATH")
 
     # Save uploaded audio
@@ -352,10 +362,18 @@ async def _voice_chat_inner(file, lang, x_intent, x_device):
         tmp.write(await file.read())
         tmp_path = tmp.name
 
-    # Transcribe — Whisper also detects the spoken language
+    # Transcribe — language forced when known, auto-detected otherwise.
+    # A short neutral prompt primes the decoder without biasing vocabulary.
+    _WHISPER_PROMPTS = {
+        "en": "Chatette.",
+        "de": "Chatette.",
+        "es": "Chatette.",
+    }
+    whisper_lang = lang if lang in _WHISPER_PROMPTS else None
     segments, info = whisper_model.transcribe(
         tmp_path,
-        initial_prompt="Chatette, turn on the lights, set a reminder, what's the weather, add to my list.",
+        language=whisper_lang,
+        initial_prompt=_WHISPER_PROMPTS.get(lang),
     )
     transcript = " ".join([seg.text for seg in segments]).strip()
     os.unlink(tmp_path)
@@ -396,9 +414,37 @@ async def _voice_chat_inner(file, lang, x_intent, x_device):
         transcript = "turn on the lights"
     elif x_intent == "bulb_off":
         transcript = "turn off the lights"
+    elif x_intent == "get_weather" and not transcript:
+        _weather_defaults = {
+            "en": "what's the weather today?",
+            "de": "wie ist das Wetter heute?",
+            "es": "qué tiempo hace hoy?",
+        }
+        transcript = _weather_defaults.get(lang, _weather_defaults["en"])
+    elif x_intent == "view_agenda" and not transcript:
+        _agenda_defaults = {
+            "en": "give me a summary of my agenda, reminders, and recent emails",
+            "de": "gib mir eine Übersicht meiner Termine, Erinnerungen und letzten E-Mails",
+            "es": "dame un resumen de mi agenda, recordatorios y correos recientes",
+        }
+        transcript = _agenda_defaults.get(lang, _agenda_defaults["en"])
+    elif x_intent == "view_emails" and not transcript:
+        _email_defaults = {
+            "en": "what emails have I received recently?",
+            "de": "welche E-Mails habe ich zuletzt erhalten?",
+            "es": "qué correos he recibido recientemente?",
+        }
+        transcript = _email_defaults.get(lang, _email_defaults["en"])
 
     if not transcript:
         answer = _EMPTY_TRANSCRIPT_MSG.get(tts_lang, _EMPTY_TRANSCRIPT_MSG["en"])
+    elif x_timer_seconds:
+        # Key-input countdown timer — bypass LLM, call handler directly
+        answer = handle_set_alarm("", {"seconds": int(x_timer_seconds)}, tts_lang)
+    elif x_alarm_time:
+        # Key-input wall-clock alarm — bypass LLM, call handler directly
+        h, m = map(int, x_alarm_time.split(":"))
+        answer = handle_set_alarm("", {"hour": h, "minute": m}, tts_lang)
     else:
         # Get answer — use intent as mode hint if provided
         mode = "auto"
@@ -425,17 +471,31 @@ async def _voice_chat_inner(file, lang, x_intent, x_device):
         data = signal_proc.resample_poly(data, up, down).astype(np.int16)
         wav_io.write(output_path, 48000, data)
 
+    
     def _safe_header(value: str) -> str:
-        return value.encode("latin-1", errors="replace").decode("latin-1")
+        if not value:
+            return ""
+        # Remove CR/LF (breaks HTTP header framing)
+        value = value.replace("\r", " ").replace("\n", " ")
+        # Remove control characters (0x00-0x1F except tab, and DEL 0x7F)
+        value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1F\x7F]", "", value)
+        # HTTP headers are Latin-1 bytes — drop chars outside that range (> U+00FF)
+        # but preserve accented letters, umlauts, etc. that are within Latin-1
+        value = value.encode("latin-1", errors="ignore").decode("latin-1")
+        return value[:2000]
 
-    return FileResponse(
-        output_path,
-        media_type="audio/wav",
-        headers={
-            "X-Transcript": _safe_header(transcript),
-            "X-Answer": _safe_header(answer),
-        }
-    )
+    alarm_data = get_last_alarm()
+    resp_headers = {
+        "X-Transcript": _safe_header(transcript),
+        "X-Answer": _safe_header(answer),
+        "X-Awaiting-Confirm": "1" if device_has_pending(x_device) else "0",
+    }
+    if alarm_data.get('seconds'):
+        resp_headers["X-Timer-Seconds"] = str(alarm_data['seconds'])
+    if alarm_data.get('alarm_time'):
+        h, m = alarm_data['alarm_time']
+        resp_headers["X-Alarm-Time"] = f"{h:02d}:{m:02d}"
+    return FileResponse(output_path, media_type="audio/wav", headers=resp_headers)
 
 # ===================================
 # Ingestion
@@ -734,6 +794,9 @@ class BulbBrightnessRequest(BaseModel):
 class BulbColorRequest(BaseModel):
     hue: int = 240
 
+class BulbTemperatureRequest(BaseModel):
+    kelvin: int = 2700
+
 
 @app.post("/bulb/on")
 def bulb_on():
@@ -766,6 +829,15 @@ def bulb_brightness(req: BulbBrightnessRequest):
 def bulb_color(req: BulbColorRequest):
     try:
         bulb_controller.set_color(req.hue, 100)
+        return {"status": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.post("/bulb/temperature")
+def bulb_temperature(req: BulbTemperatureRequest):
+    try:
+        bulb_controller.set_color_temperature(req.kelvin)
         return {"status": "ok"}
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
