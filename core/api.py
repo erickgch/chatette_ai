@@ -20,6 +20,10 @@ from pathlib import Path
 # Load .env before importing any module that reads env vars at import time (e.g. chromadb telemetry)
 load_dotenv(Path(__file__).parent.parent / ".env")
 
+# Disable ChromaDB telemetry before any chromadb import
+os.environ["ANONYMIZED_TELEMETRY"] = "false"
+os.environ["CHROMA_TELEMETRY"] = "false"
+
 from fastapi import FastAPI, Form, HTTPException, UploadFile, File, Header
 from scheduler import start_scheduler
 from rag_lw import ask, handle_reminder, handle_calendar_event, handle_delete, handle_delete_event, handle_draft, handle_personal_note, handle_weather, clear_device_context, clear_device_pending, device_has_pending, handle_set_alarm, get_last_alarm
@@ -30,6 +34,15 @@ from ingestion import (
     ingest_all, ingest_notes, ingest_calendar_events,
     ingest_emails, ingest_lists
 )
+
+# Patch chromadb Posthog telemetry AFTER all chromadb-touching imports are done.
+# Chromadb ignores ANONYMIZED_TELEMETRY in some versions — this silences the noisy
+# "capture() takes 1 positional argument but 3 were given" warnings at startup.
+try:
+    import chromadb.telemetry.product.posthog as _posthog
+    _posthog.Posthog.capture = lambda self, *args, **kwargs: None
+except Exception:
+    pass
 
 
 # ===================================
@@ -343,6 +356,7 @@ async def voice_chat(
     x_device: str = Header("app", alias="X-Device"),
     x_timer_seconds: str = Header(None, alias="X-Timer-Seconds"),
     x_alarm_time:    str = Header(None, alias="X-Alarm-Time"),
+    x_skip_whisper:  str = Header(None, alias="X-Skip-Whisper"),
 ):
     if _processing_lock.locked():
         raise HTTPException(status_code=503, headers={"X-Chatette-Busy": "true"},
@@ -350,11 +364,13 @@ async def voice_chat(
 
     async with _processing_lock:
         return await _voice_chat_inner(
-            file, lang, x_intent, x_device, x_timer_seconds, x_alarm_time)
+            file, lang, x_intent, x_device, x_timer_seconds, x_alarm_time,
+            x_skip_whisper=x_skip_whisper)
 
 
 async def _voice_chat_inner(file, lang, x_intent, x_device,
-                             x_timer_seconds=None, x_alarm_time=None):
+                             x_timer_seconds=None, x_alarm_time=None,
+                             x_skip_whisper=None):
     PIPER_PATH = os.getenv("PIPER_PATH")
 
     # Save uploaded audio
@@ -362,28 +378,25 @@ async def _voice_chat_inner(file, lang, x_intent, x_device,
         tmp.write(await file.read())
         tmp_path = tmp.name
 
-    # Transcribe — language forced when known, auto-detected otherwise.
-    # A short neutral prompt primes the decoder without biasing vocabulary.
-    _WHISPER_PROMPTS = {
-        "en": "Chatette.",
-        "de": "Chatette.",
-        "es": "Chatette.",
-    }
-    whisper_lang = lang if lang in _WHISPER_PROMPTS else None
-    segments, info = whisper_model.transcribe(
-        tmp_path,
-        language=whisper_lang,
-        initial_prompt=_WHISPER_PROMPTS.get(lang),
-    )
-    transcript = " ".join([seg.text for seg in segments]).strip()
-    os.unlink(tmp_path)
-
-    # Auto-select language from Whisper detection; fall back to client param for silence.
-    spoken_lang = (
-        info.language
-        if (transcript and info.language in _PIPER_VOICE_MAP)
-        else lang
-    )
+    if x_skip_whisper == "true":
+        # Button-driven intent — transcript will be set by intent-override logic below.
+        # Skip Whisper entirely to save latency.
+        transcript = ""
+        spoken_lang = lang
+        os.unlink(tmp_path)
+    else:
+        whisper_lang = lang if lang in ("en", "de", "es") else None
+        segments, info = whisper_model.transcribe(
+            tmp_path,
+            language=whisper_lang,
+        )
+        transcript = " ".join([seg.text for seg in segments]).strip()
+        os.unlink(tmp_path)
+        spoken_lang = (
+            info.language
+            if (transcript and info.language in _PIPER_VOICE_MAP)
+            else lang
+        )
 
     # Determine TTS language:
     # - Verbal requests: trust Whisper detection; store it for later.
@@ -454,12 +467,24 @@ async def _voice_chat_inner(file, lang, x_intent, x_device,
             mode = "control_bulbs"
         answer = ask(transcript, mode=mode, lang=tts_lang, device_id=x_device)
 
+    # Strip emojis before TTS (they appear in text but should not be spoken)
+    import unicodedata
+    def _strip_emojis(text: str) -> str:
+        return "".join(
+            c for c in text
+            if not (unicodedata.category(c) in ("So", "Mn")
+                    or 0x1F300 <= ord(c) <= 0x1FAFF
+                    or 0x2600  <= ord(c) <= 0x27BF
+                    or 0xFE00  <= ord(c) <= 0xFE0F)
+        ).strip()
+    tts_text = _strip_emojis(answer)
+
     # Generate TTS
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         output_path = tmp.name
     subprocess.run(
         [PIPER_PATH, "--model", piper_voice, "--length-scale", "1.2", "--output_file", output_path],
-        input=answer.encode("utf-8"),
+        input=tts_text.encode("utf-8"),
         check=True
     )
 

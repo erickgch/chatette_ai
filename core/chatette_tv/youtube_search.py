@@ -13,8 +13,8 @@ def is_available() -> bool:
     return bool(os.getenv("YOUTUBE_API_KEY", "")) and not _quota_exceeded
 
 
-def search_videos(query: str, max_results: int = 5) -> list[dict] | None:
-    """Search YouTube. Returns list of {video_id, title, thumbnail} or None on error."""
+def search_videos(query: str, max_results: int = 5, page_token: str = "") -> dict | None:
+    """Search YouTube. Returns {results: [...], next_page_token: str} or None on error."""
     global _quota_exceeded
     api_key = os.getenv("YOUTUBE_API_KEY", "")
     if not api_key:
@@ -24,17 +24,16 @@ def search_videos(query: str, max_results: int = 5) -> list[dict] | None:
         print("[YouTubeSearch] Quota exceeded — search disabled.")
         return None
     try:
-        resp = requests.get(
-            _SEARCH_URL,
-            params={
-                "part":       "snippet",
-                "q":          query,
-                "maxResults": max_results,
-                "type":       "video",
-                "key":        api_key,
-            },
-            timeout=10,
-        )
+        params = {
+            "part":       "snippet",
+            "q":          query,
+            "maxResults": max_results,
+            "type":       "video",
+            "key":        api_key,
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        resp = requests.get(_SEARCH_URL, params=params, timeout=10)
         if resp.status_code == 403:
             data = resp.json()
             errors = data.get("error", {}).get("errors", [])
@@ -43,19 +42,15 @@ def search_videos(query: str, max_results: int = 5) -> list[dict] | None:
                 print("[YouTubeSearch] Daily quota exceeded — YouTube search disabled until restart.")
                 return None
         resp.raise_for_status()
-        items = resp.json().get("items", [])
+        body = resp.json()
         results = []
-        for item in items:
-            video_id = item["id"]["videoId"]
-            snippet  = item["snippet"]
-            title    = snippet["title"]
-            thumbnail = (
-                snippet.get("thumbnails", {})
-                .get("medium", {})
-                .get("url", "")
-            )
+        for item in body.get("items", []):
+            video_id  = item["id"]["videoId"]
+            snippet   = item["snippet"]
+            title     = snippet["title"]
+            thumbnail = snippet.get("thumbnails", {}).get("medium", {}).get("url", "")
             results.append({"video_id": video_id, "title": title, "thumbnail": thumbnail})
-        return results
+        return {"results": results, "next_page_token": body.get("nextPageToken", "")}
     except Exception as e:
         print(f"[YouTubeSearch] Error: {e}")
         return None

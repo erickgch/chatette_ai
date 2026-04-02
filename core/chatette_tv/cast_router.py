@@ -14,11 +14,16 @@ router = APIRouter()
 _CHANNEL_DISPLAY = {
     "ard":      "ARD",
     "zdf":      "ZDF",
-    "arte":     "Arte",
-    "france24": "France 24",
-    "dw":       "DW",
     "euronews": "Euronews",
+    "arte_fr":  "Arte (FR)",
+    "arte_de":  "Arte (DE)",
+    "milenio":  "Milenio",
+    "tv5monde": "TV5 Monde",
+    "nhk":      "NHK World",
 }
+
+# Euronews YouTube live fallback (English) — used if HLS stream is down
+_EURONEWS_YT_ID = "9Auq9mYxFEE"
 
 
 @router.post("/tv/power", response_model=CastResponse)
@@ -43,11 +48,12 @@ def tv_volume(req: VolumeRequest):
 
 @router.post("/youtube/search", response_model=YouTubeSearchResponse)
 def youtube_search_endpoint(req: YouTubeSearchRequest):
-    results = youtube_search.search_videos(req.query)
-    if results is None:
+    data = youtube_search.search_videos(req.query, page_token=req.page_token)
+    if data is None:
         return YouTubeSearchResponse(results=[])
     return YouTubeSearchResponse(
-        results=[YouTubeResult(**r) for r in results]
+        results=[YouTubeResult(**r) for r in data["results"]],
+        next_page_token=data["next_page_token"],
     )
 
 
@@ -68,6 +74,11 @@ def cast_channel(req: ChannelRequest):
     name = _CHANNEL_DISPLAY.get(req.channel, req.channel)
     print(f"[CastRouter] Playing {name} → {url[:60]}…")
     ok = cast_manager.play_hls(url, title=name)
+    if not ok and req.channel == "euronews":
+        print("[CastRouter] Euronews HLS failed — trying YouTube fallback")
+        ok = cast_manager.play_youtube(_EURONEWS_YT_ID)
+        if ok:
+            return CastResponse(ok=True, message=f"Casting Euronews (YouTube).")
     return CastResponse(ok=ok, message=f"Casting {name}." if ok else "Chromecast not reachable.")
 
 
@@ -75,6 +86,12 @@ def cast_channel(req: ChannelRequest):
 def cast_stop():
     ok = cast_manager.stop()
     return CastResponse(ok=ok, message="Playback stopped." if ok else "Chromecast not reachable.")
+
+
+@router.post("/play", response_model=CastResponse)
+def cast_play():
+    ok = cast_manager.resume()
+    return CastResponse(ok=ok, message="Resumed." if ok else "Chromecast not reachable.")
 
 
 @router.get("/status", response_model=StatusResponse)

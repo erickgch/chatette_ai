@@ -19,6 +19,7 @@ import threading
 _lock = threading.RLock()
 _cast = None
 _yt_controller = None
+_last_cast = None  # {'type': 'hls', 'url': str, 'title': str} | {'type': 'youtube', 'video_id': str}
 
 _CHROMECAST_IP = "192.168.0.7"
 _WAKEUP_APP_ID = "CC1AD845"   # Default Media Receiver — triggers CEC Active Source
@@ -147,6 +148,7 @@ def volume_delta(delta: int) -> int:
 
 
 def play_hls(url: str, title: str = "") -> bool:
+    global _last_cast
     cast = ensure_connected()
     if not cast:
         return False
@@ -154,6 +156,7 @@ def play_hls(url: str, title: str = "") -> bool:
         mc = cast.media_controller
         mc.play_media(url, "application/x-mpegURL", title=title)
         mc.block_until_active(timeout=10)
+        _last_cast = {'type': 'hls', 'url': url, 'title': title}
         return True
     except Exception as e:
         print(f"[CastManager] play_hls error: {e}")
@@ -161,12 +164,13 @@ def play_hls(url: str, title: str = "") -> bool:
 
 
 def play_youtube(video_id: str) -> bool:
-    global _yt_controller
+    global _yt_controller, _last_cast
     cast = ensure_connected()
     if not cast or _yt_controller is None:
         return False
     try:
         _yt_controller.play_video(video_id)
+        _last_cast = {'type': 'youtube', 'video_id': video_id}
         return True
     except Exception as e:
         print(f"[CastManager] play_youtube error: {e}")
@@ -183,6 +187,15 @@ def stop() -> bool:
     except Exception as e:
         print(f"[CastManager] stop error: {e}")
         return False
+
+
+def resume() -> bool:
+    if _last_cast is None:
+        return False
+    if _last_cast['type'] == 'hls':
+        return play_hls(_last_cast['url'], _last_cast['title'])
+    else:
+        return play_youtube(_last_cast['video_id'])
 
 
 def get_status() -> dict:

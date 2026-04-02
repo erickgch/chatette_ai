@@ -16,68 +16,33 @@ import requests
 
 # ── M3U sources ───────────────────────────────────────────────────────────────
 _M3U_URLS = [
-    "https://iptv-org.github.io/iptv/countries/de.m3u",    # ARD, ZDF, Arte, DW
-    "https://iptv-org.github.io/iptv/categories/news.m3u",  # France24, Euronews, DW
-    "https://iptv-org.github.io/iptv/countries/gb.m3u",     # Euronews EN, France24 EN
+    "https://iptv-org.github.io/iptv/countries/de.m3u",  # ARD, ZDF
 ]
 
 # ── Channel matching rules ────────────────────────────────────────────────────
 # Each entry: (tvg-id substring, channel_key, required tvg-language or None)
-# First match per key wins across all M3U files.
+# First match per key wins. All other channels use hardcoded URLs only.
 _RULES: list[tuple[str, str, str | None]] = [
-    ("DasErste.de",    "ard",      None),
-    ("ZDF.de",         "zdf",      None),
-    ("Arte.de",        "arte",     None),
-    ("France24En.fr",  "france24", None),        # English-specific tvg-id
-    ("France24.fr",    "france24", "English"),   # fallback: language-filtered match
-    ("DW.de",          "dw",       "English"),
-    ("EuronewsEN.en",  "euronews", None),        # English Euronews (iptv-org id)
-    ("Euronews.en",    "euronews", None),         # alternate English id
-    ("EuronewsDE.de",  "euronews", None),        # German as fallback
-    ("Euronews.de",    "euronews", None),         # last resort
+    ("DasErste.de", "ard", None),
+    ("ZDF.de",      "zdf", None),
 ]
 
 # ── Hardcoded fallbacks ───────────────────────────────────────────────────────
 _FALLBACKS: dict[str, str] = {
     "ard":      "https://mcdn.daserste.de/daserste/de/master.m3u8",
     "zdf":      "https://zdf-hls-03.akamaized.net/hls/live/2016498/de/high/master.m3u8",
-    "arte":     "https://artesimulcast.akamaized.net/hls/live/2031003/artelive_de/index.m3u8",
-    "france24": "https://stream.france24.com/hls/live/2037161/F24_EN_HI_HLS/master.m3u8",
-    "dw":       "https://dwamdstream104.akamaized.net/hls/live/2015530/dwstream104/index.m3u8",
-    "euronews": "https://euronews-euronews-euronews1-live.freecaster.net/live/euronews1/euronews_ENGLISH_HD.m3u8",
+    "euronews": "https://euronews-live-spa-es.fast.rakuten.tv/v1/master/0547f18649bd788bec7b67b746e47670f558b6b2/production-LiveChannel-6571/bitok/eyJzdGlkIjoiMDA0YjY0NTMtYjY2MC00ZTZkLTlkNzEtMTk3YTM3ZDZhZWIxIiwibWt0IjoiZXMiLCJjaCI6NjU3MSwicHRmIjoxfQ==/26034/euronews-es.m3u8",
+    "arte_fr":  "https://artesimulcast.akamaized.net/hls/live/2031003/artelive_fr/master.m3u8",
+    "arte_de":  "https://artesimulcast.akamaized.net/hls/live/2030993/artelive_de/master.m3u8",
+    "milenio":  "https://mdstrm.com/live-stream-playlist/610178c7db32a4112d994650.m3u8",
+    "tv5monde": "https://ott.tv5monde.com/Content/HLS/Live/channel(europe)/variant.m3u8",
+    "nhk":      "https://nhk.lls.pbs.org/index.m3u8",
 }
 
 _registry: dict[str, str] = dict(_FALLBACKS)
 _lock = threading.Lock()
 
 _ATTR_RE = re.compile(r'([\w-]+)="([^"]*)"')
-
-
-# ── Arte official API ─────────────────────────────────────────────────────────
-
-def _fetch_arte_url() -> str | None:
-    """Call Arte's player API to get a fresh HLS URL for Arte DE live."""
-    try:
-        resp = requests.get(
-            "https://www.arte.tv/api/player/v2/config/de/LIVE",
-            timeout=8,
-        )
-        resp.raise_for_status()
-        streams = (
-            resp.json()
-            .get("data", {})
-            .get("attributes", {})
-            .get("streams", [])
-        )
-        for s in streams:
-            if s.get("protocol") == "HLS":
-                url = s.get("url")
-                if url:
-                    print(f"[ChannelRegistry] Arte live URL refreshed from API")
-                    return url
-    except Exception as e:
-        print(f"[ChannelRegistry] Arte API failed: {e}")
-    return None
 
 
 # ── M3U parsing ───────────────────────────────────────────────────────────────
@@ -143,14 +108,7 @@ def init() -> None:
 
 
 def get_url(channel: str) -> str | None:
-    key = channel.lower().replace(" ", "").replace("-", "")
-
-    # Arte: always fetch a fresh URL from the official API first
-    if key == "arte":
-        live = _fetch_arte_url()
-        if live:
-            return live
-
+    key = channel.lower().replace(" ", "").replace("-", "_")
     with _lock:
         return _registry.get(key) or _FALLBACKS.get(key)
 

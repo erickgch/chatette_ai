@@ -5,10 +5,12 @@
 .env
 token.pickle
 credentials.json
-data/notes/notifications_cache.json
+*.onnx
+*.onnx.json
 
-# ChromaDB data
-data/chroma_db/
+# All user data (notes, chroma_db, sync state, caches)
+data/
+core/data/
 
 # Python cache
 __pycache__/

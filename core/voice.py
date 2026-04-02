@@ -21,7 +21,7 @@ PIPER_VOICE = os.getenv("PIPER_VOICE")
 
 # Load Whisper model
 print("🎙️ Loading Whisper model...")
-whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
+whisper_model = WhisperModel("small", device="cpu", compute_type="int8")
 print("✅ Whisper ready!")
 
 

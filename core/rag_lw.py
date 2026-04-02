@@ -452,7 +452,7 @@ Valid intents:
 - control_bulbs: user wants to control a smart light bulb (e.g. "turn on the lights", "dim to 50%", "set color to blue", "red lights on", "turn off the lamp")
 - set_alarm: user wants to set a countdown timer ("set a timer for 10 minutes", "remind me in 30 seconds") OR an alarm at a specific time ("set an alarm for 7 AM", "wake me up at 6:30", "alarm at 20:00")
 - cast_youtube: user wants to play a YouTube video on TV ("play Bonobo on YouTube", "put on some jazz on the TV", "cast this to the TV")
-- cast_channel: user wants to watch a live TV channel ("put on France24", "open Arte", "switch to DW", "I want to watch ARD", "turn on Euronews", "put on ZDF")
+- cast_channel: user wants to watch a live TV channel ("I want to watch ARD", "put on ZDF", "turn on Euronews", "open Arte", "put on Milenio", "TV5 Monde", "NHK World")
 - cast_tv_power: user wants to turn the TV on or off ("turn on the TV", "turn off the TV", "switch the TV off")
 - cast_volume: user wants to change TV volume ("volume up", "volume down", "set volume to 40", "louder", "quieter", "mute")
 - cast_stop: user wants to stop TV playback ("stop the TV", "pause the TV", "stop casting")
@@ -476,7 +476,7 @@ IMPORTANT: If the user mentions multiple items of the same type, extract ALL of 
 - control_bulbs: {{}}
 - set_alarm: for a countdown use {{"seconds": <total seconds>}}; for a specific time use {{"hour": <0-23>, "minute": <0-59>}}
 - cast_youtube: {{"query": "search query string"}}
-- cast_channel: {{"channel": "ard"|"arte"|"france24"|"dw"|"euronews"|"zdf"}}
+- cast_channel: {{"channel": "ard"|"zdf"|"euronews"|"arte_fr"|"arte_de"|"milenio"|"tv5monde"|"nhk"}}
 - cast_tv_power: {{"action": "on"|"off"}}
 - cast_volume: {{"level": 0-100}} for absolute, or {{"delta": -100 to 100}} for relative (e.g. "louder" → +10, "quieter" → -10)
 - cast_stop: {{}}
@@ -1505,8 +1505,9 @@ Keep it concise — a few sentences at most."""
 # ── Chatette TV handlers ──────────────────────────────────────────────────────
 
 _CHANNEL_DISPLAY = {
-    "ard": "ARD", "arte": "Arte", "france24": "France 24",
-    "dw": "DW", "euronews": "Euronews",
+    "ard": "ARD", "zdf": "ZDF", "euronews": "Euronews",
+    "arte_fr": "Arte (FR)", "arte_de": "Arte (DE)",
+    "milenio": "Milenio", "tv5monde": "TV5 Monde", "nhk": "NHK World",
 }
 
 
@@ -1704,7 +1705,7 @@ Keep it concise — highlight sender and subject, mention body only if relevant.
 
 
 def handle_weather(question: str, extracted: dict, lang: str = "en") -> str:
-    """Fetch weather and return a natural Chatette-style response."""
+    """Fetch weather and return a natural Chatette-style response. Be concise. Do not give much information about the wind."""
     city = extracted.get("city", "").strip()
     timeframe = extracted.get("timeframe", "today").lower()
 

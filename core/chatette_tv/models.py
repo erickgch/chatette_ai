@@ -13,6 +13,7 @@ class VolumeRequest(BaseModel):
 
 class YouTubeSearchRequest(BaseModel):
     query: str
+    page_token: str = ""
 
 class YouTubeCastRequest(BaseModel):
     video_id: str
@@ -25,10 +26,11 @@ class YouTubeResult(BaseModel):
 
 class YouTubeSearchResponse(BaseModel):
     results: list[YouTubeResult]
+    next_page_token: str = ""
 
 
 class ChannelRequest(BaseModel):
-    channel: Literal["ard", "arte", "france24", "dw", "euronews", "zdf"]
+    channel: Literal["ard", "zdf", "euronews", "arte_fr", "arte_de", "milenio", "tv5monde", "nhk"]
 
 
 class CastResponse(BaseModel):
