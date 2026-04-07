@@ -1705,7 +1705,7 @@ Keep it concise — highlight sender and subject, mention body only if relevant.
 
 
 def handle_weather(question: str, extracted: dict, lang: str = "en") -> str:
-    """Fetch weather and return a natural Chatette-style response. Be concise. Do not give much information about the wind."""
+    """Fetch weather and return a natural Chatette-style response with time-of-day temperatures and qualitative wind descriptions."""
     city = extracted.get("city", "").strip()
     timeframe = extracted.get("timeframe", "today").lower()
 
@@ -1757,9 +1757,12 @@ Here is the current weather data:
 {context}
 
 Respond naturally in Chatette's voice — warm, concise, useful.
-Highlight the most important things (temperature, rain, wind if notable). Don't be too technical.
-Respond in {_LANG_NAMES.get(lang, 'English')}.
-Keep it to 2-3 sentences maximum."""
+Rules for your response:
+- Give temperatures with time references: say "X degrees in the morning / during the day / in the evening / at night", not "between X and Y degrees".
+- Describe wind qualitatively, not as a speed: use words like "calm", "light breeze", "moderate wind", "strong wind", "very windy". Never say km/h.
+- Mention rain only if it is likely (≥40% probability).
+- Keep it to 2-3 sentences maximum.
+Respond in {_LANG_NAMES.get(lang, 'English')}."""
 
     return llm_invoke(weather_prompt).strip()
 

@@ -335,7 +335,7 @@ _device_last_lang: dict[str, str] = {}
 
 _PIPER_VOICE_MAP = {
     "en": None,  # resolved at runtime from PIPER_VOICE env var
-    "de": "piper/de_DE-kerstin-low.onnx",
+    "de": "piper/de_DE-ramona-low.onnx",
     "es": "piper/es_AR-daniela-high.onnx",
 }
 
@@ -389,9 +389,14 @@ async def _voice_chat_inner(file, lang, x_intent, x_device,
         segments, info = whisper_model.transcribe(
             tmp_path,
             language=whisper_lang,
+            condition_on_previous_text=False,
+            no_speech_threshold=0.6,
         )
-        transcript = " ".join([seg.text for seg in segments]).strip()
+        seg_list = list(segments)
         os.unlink(tmp_path)
+        # Filter out hallucinated segments (high no_speech_prob)
+        real_segs = [s for s in seg_list if s.no_speech_prob < 0.6]
+        transcript = " ".join(s.text for s in real_segs).strip()
         spoken_lang = (
             info.language
             if (transcript and info.language in _PIPER_VOICE_MAP)
@@ -479,14 +484,18 @@ async def _voice_chat_inner(file, lang, x_intent, x_device,
         ).strip()
     tts_text = _strip_emojis(answer)
 
-    # Generate TTS
+    # Generate TTS — piper on Windows exits with non-zero due to a stack-guard
+    # firing during cleanup, but the output WAV is fully written before that.
+    # Use check=False and verify the file instead.
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         output_path = tmp.name
     subprocess.run(
         [PIPER_PATH, "--model", piper_voice, "--length-scale", "1.2", "--output_file", output_path],
         input=tts_text.encode("utf-8"),
-        check=True
+        check=False,
     )
+    if not os.path.exists(output_path) or os.path.getsize(output_path) < 100:
+        raise RuntimeError(f"Piper failed to produce audio for: {tts_text[:60]}")
 
     # Resample to 48000Hz for Pi
     rate, data = wav_io.read(output_path)
