@@ -1,4 +1,4 @@
-# 🐱 Chatette — Personal AI Assistant & Smart Home Manager
+# 🐱 Chatette — Personal AI Assistant & Smart Home Manager (v.02)
 
 Chatette is a DIY-spirited, privacy-focused personal AI assistant that runs on your own hardware.
 Built for people who want the power of a smart assistant without giving up their privacy or
@@ -16,8 +16,8 @@ over your home WiFi. Your notes, reminders, lists and documents never leave your
 
 **Reminders**
 Tell Chatette to remember anything — errands, ideas, appointments. She saves them locally,
-reads them back, manages conflicts and removes them on request. Notifications fire daily at
-9:00, 12:00 and 18:00.
+reads them back, manages conflicts and removes them on request. Notifications fire daily
+three times per day (default: at 9:00, 12:00 and 18:00).
 
 **Lists**
 Create and manage checkbox lists — shopping lists, packing lists, to-do lists.
@@ -32,7 +32,7 @@ Ask for your agenda and Chatette combines reminders and upcoming calendar events
 concise briefing in one LLM call.
 
 **Gmail**
-Ask Chatette to summarise recent emails. She searches the RAG index first and falls back to
+Ask Chatette to summarize recent emails. She searches the RAG index first and falls back to
 a live Gmail API call if needed.
 
 **Draft Creation**
@@ -41,39 +41,15 @@ saves it to your documents folder, always in the language you asked in.
 
 **Personal Notes / Journal**
 Save personal information, thoughts or anything you want Chatette to remember about you.
-She uses these to give more personalised responses.
+She uses these to give more personalized responses.
 
 **Weather**
-Ask about today's weather, tomorrow's, or the weekly forecast. Chatette describes temperatures
-by time of day (morning / daytime / evening) and wind qualitatively (calm, light breeze,
-strong wind) — never raw km/h figures.
+Ask about today's weather, tomorrow's, or the weekly forecast. Chatette tells you
+the weather in a clear and concise way. 
 
 **General Knowledge**
 Answer general questions, give recommendations, explain concepts and hold a conversation —
 like any AI assistant, but running on your own terms.
-
----
-
-### Smart Home
-
-**Lights — TP-Link Tapo L530 Smart Bulb**
-Control the living-room bulb from the app or via voice/chat:
-- Turn on / off
-- Set brightness (1–100%)
-- Set colour temperature (warm white 2500 K → cool white 6500 K)
-- Set colour (full hue wheel)
-
-**TV — Chromecast + YouTube**
-Cast content to your TV from the app:
-- Open named channels (ZDF, ARD, Euronews, Arte FR/DE, Milenio, TV5 Monde, NHK World)
-- Search YouTube and cast directly to the TV
-- Power on / off, stop, resume via control bar
-
-**Voice Phone — Raspberry Pi Zero 2 W**
-A Raspberry Pi Zero 2 W acts as a stationary voice phone anywhere in the home.
-Hardware buttons trigger intents directly (weather, agenda, emails, lights, timer, alarm)
-without needing to speak a command. Chatette responds in the selected language via
-Piper TTS streamed to the Pi's audio output.
 
 ---
 
@@ -87,6 +63,30 @@ Spanish (es_AR-daniela-high).
 
 Select your language with the flag buttons in the app before pressing the mic.
 Chatette always responds in the language you speak or write in.
+
+---
+
+### Smart Home
+
+**Lights — TP-Link Tapo L530 Smart Bulb**
+Control the living-room bulb from the app or via voice/chat:
+- Turn on / off
+- Set brightness
+- Set color temperature (white light)
+- Set color (full hue wheel)
+
+**TV — Chromecast + YouTube**
+Cast content to your TV from the app:
+- Open named channels (ZDF, ARD, Euronews, Arte FR/DE, Milenio, TV5 Monde, NHK World)
+- Search YouTube and cast directly to the TV
+- Power on / off, stop, resume via control bar
+
+**Retro Phone — Raspberry Pi Zero 2 W**
+A Raspberry Pi Zero 2 W powers an old stationary phone, turning it into a Chatette hotline.
+Hardware buttons trigger intents directly (weather, agenda, emails, lights, timer, alarm)
+without needing to speak a command. Chatette responds in the selected language via
+Piper TTS streamed to the Pi's audio output.
+* See 'Chatette Hotline' project for more information.
 
 ---
 
