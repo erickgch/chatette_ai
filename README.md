@@ -1,4 +1,4 @@
-# 🐱 Chatette — Personal AI Assistant & Smart Home Manager (v.02)
+# 🐱 Chatette — Personal AI Assistant & Smart Home Manager (v0.2)
 
 Chatette is a DIY-spirited, privacy-focused personal AI assistant that runs on your own hardware.
 Built for people who want the power of a smart assistant without giving up their privacy or
