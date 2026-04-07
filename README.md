@@ -161,6 +161,38 @@ data on every call.
 
 ---
 
+## Android App
+
+The companion Android app is not publicly distributed.
+If you are interested in trying the full Chatette experience including the app,
+feel free to get in touch.
+
+---
+
+## Voice Feature (Optional)
+
+Chatette supports voice input and output using:
+- **faster-whisper** for speech-to-text (runs locally)
+- **Piper TTS** for text-to-speech (runs locally, EN / DE / ES voices)
+
+Download Piper from [rhasspy/piper releases](https://github.com/rhasspy/piper/releases)
+and place `piper.exe` + voice model files in the `piper/` folder, then update your `.env`:
+
+```env
+PIPER_PATH=piper/piper.exe
+PIPER_VOICE=piper/en_US-libritts_r-medium.onnx
+```
+
+Available voice models:
+
+| Language | Model file |
+|---|---|
+| English | `en_US-libritts_r-medium.onnx` |
+| German | `de_DE-ramona-low.onnx` |
+| Spanish | `es_AR-daniela-high.onnx` |
+
+---
+
 ## Privacy
 
 Your documents, lists, reminders and notes never leave your home network.
@@ -239,18 +271,7 @@ HOME_LAT=0.0000
 HOME_LON=0.0000
 ```
 
-### 6. Set up Piper TTS (optional — required for voice)
-
-Download Piper from [rhasspy/piper releases](https://github.com/rhasspy/piper/releases).
-Place `piper.exe` and your voice model files in the `piper/` folder.
-
-Available voice models used by Chatette:
-
-| Language | Model file |
-|---|---|
-| English | `en_US-libritts_r-medium.onnx` |
-| German | `de_DE-ramona-low.onnx` |
-| Spanish | `es_AR-daniela-high.onnx` |
+### 6. Set up Piper TTS (optional — see [Voice Feature](#voice-feature-optional) section)
 
 ### 7. Run Chatette
 
