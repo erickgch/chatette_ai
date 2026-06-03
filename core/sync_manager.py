@@ -208,7 +208,8 @@ def build_pull_response() -> dict:
 def apply_push(payload: dict) -> dict:
     """
     Apply changes from phone to PC files using type-aware merge.
-    - Reminders: union merge (deduplicate by text)
+    - Reminders: PC is authoritative — phone push is ignored to prevent resurrection of deleted reminders.
+      Reminders are only ever created/deleted via chat on PC, never directly on the phone.
     - Lists: union merge per file (deduplicate by item text, checked from newer side)
     - Personal notes: keep PC on conflict, save phone version as journal_offline_edit_<ts>.txt
     """
@@ -216,19 +217,9 @@ def apply_push(payload: dict) -> dict:
     updated = []
     conflict_files = []
 
-    # Reminders — union merge
-    phone_reminders = payload.get("reminders")
-    if phone_reminders and phone_reminders.get("content") is not None:
-        phone_modified = phone_reminders.get("modified", "")
-        last_sync = meta.get("reminders_last_sync", datetime.min.isoformat())
-
-        if phone_modified > last_sync:
-            pc_content = _read_file(REMINDERS_FILE)
-            merged = _merge_reminders(pc_content, phone_reminders["content"])
-            _write_file(REMINDERS_FILE, merged)
-            meta["reminders_last_sync"] = datetime.now().isoformat()
-            updated.append("reminders")
-            print("✅ Reminders merged from phone")
+    # Reminders — PC is authoritative, phone push intentionally ignored.
+    # Reminders are created/deleted via chat (which writes directly to PC).
+    # Merging from phone would resurrect reminders the user deleted via chat.
 
     # Personal notes — conflict handling
     phone_notes = payload.get("personal_notes")

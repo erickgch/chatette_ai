@@ -25,6 +25,8 @@ from weather import (
     format_weather_context, geocode
 )
 from pydantic import BaseModel, field_validator, ValidationError, ConfigDict
+from memory.summarizer import get_memory_block, retrieve_episodes, is_personal_query, run_summarizer
+from memory.memory_router import init_router
 
 load_dotenv()
 os.chdir(Path(__file__).parent.parent)
@@ -210,7 +212,7 @@ About {user_name}: {user_profile}
 Your personality:
 - Warm, friendly and competent — like a smart friend who always has things under control.
 - You have your own voice. Not a generic AI bot. Not a corporate assistant.
-- Direct and accurate. You answer first, add warmth second.
+- Diligent, accurate, but friendly. You answer first, add warmth second.
 - Occasionally use cool, casual phrases that feel natural — not forced.
 - Very rarely, a subtle cat hint slips through — natural, never cheesy.
 - Never over-explain or pad responses with unnecessary pleasantries.
@@ -221,11 +223,14 @@ CHATETTE_RULES = """
 STRICT RULES:
 - Only answer what was specifically asked. Nothing more. Do not make additional comments.
 - Keep answers to 1-2 sentences maximum.
-- Never calculate days of the week from memory — derive them from the current date in context.
 - Always respond in the same language of the QUESTION, not the context.
 - If the question refers to a previous exchange, use it to answer correctly.
 - Never invent personal information not in the profile.
-- Never refer to {user_name} in third person — use 'you' and 'your'."""
+- Never refer to {user_name} in third person — use 'you' and 'your'.
+- When corrected on a factual error, say so briefly and drop it. Never propose an alternative wrong answer as a recovery.
+- Never claim to control hardware or services not explicitly listed in your tools. You can control smart bulbs. That is all.
+- Do not use calendar, reminders, or notes context unless the question is directly about {user_name}'s schedule, tasks, or plans.
+- When asked about yourself (your plans, feelings, preferences), answer honestly as a software assistant. You do not have a physical life, personal plans, or a schedule of your own."""
 
 
 # Custom RAG prompt
@@ -260,6 +265,8 @@ _current_device: ContextVar[str] = ContextVar("device_id", default="app")
 
 _pending_state: dict[str, "PendingState"] = {}
 _conversation_contexts: dict[str, dict] = {}
+_turn_history: dict[str, list[dict]] = {}
+SUMMARIZER_TRIGGER = 20
 
 
 def _pending() -> "PendingState":
@@ -291,6 +298,27 @@ def clear_device_pending(device_id: str) -> None:
 
 def device_has_pending(device_id: str) -> bool:
     return device_id in _pending_state and _pending_state[device_id].action is not None
+
+
+def _record_turn(question: str, answer: str) -> None:
+    """Append turn to per-device history; fire summariser every SUMMARIZER_TRIGGER turns."""
+    device = _current_device.get()
+    history = _turn_history.setdefault(device, [])
+    history.append({"question": question, "answer": answer})
+    if len(history) >= SUMMARIZER_TRIGGER:
+        batch = history.copy()
+        _turn_history[device] = []
+        threading.Thread(
+            target=run_summarizer, args=(batch, llm_invoke), daemon=True
+        ).start()
+        print(f"[memory] Summariser triggered after {len(batch)} turns for '{device}'")
+
+
+def get_device_turn_history(device_id: str) -> list[dict]:
+    return list(_turn_history.get(device_id, []))
+
+
+init_router(get_device_turn_history, llm_invoke)
 
 
 # ===================================
@@ -588,8 +616,8 @@ Examples:
 "write down dentist next Friday"
 → ["Dentist next Friday"]
 
-"save a reminder due tomorrow to wash white clothes"
-→ ["Wash white clothes tomorrow"]
+"save a reminder due tomorrow to wash white clothes and pick up the cake"
+→ ["Wash white clothes tomorrow", "Pick up the cake tomorrow"]
 
 Output (JSON array only):"""
         try:
@@ -1372,42 +1400,51 @@ Respond in {_LANG_NAMES.get(lang, 'English')}."""
     return llm_invoke(format_prompt).strip()
 
 
-def handle_view_events(question: str, lang: str = "en") -> str:
-    """Return upcoming calendar events — RAG first, live fallback if empty."""
-    current_date = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
-
-    # Try RAG first (fast, no API call)
-    rag_docs = []
+def _relative_event_label(start_iso: str) -> str:
+    """Convert an ISO start string to a human-readable label with a relative-date hint.
+    Example: 'Wednesday, June 4 at 8:00 PM (tomorrow)'
+    Python computes the relative offset so the LLM never has to do date arithmetic.
+    """
     try:
-        results = vectorstore.similarity_search(
-            question, k=5,
-            filter={"collection": "calendar"}
+        from datetime import date as _date
+        dt = datetime.fromisoformat(start_iso)
+        today = _date.today()
+        delta = (dt.date() - today).days
+        if delta == 0:
+            rel = "today"
+        elif delta == 1:
+            rel = "tomorrow"
+        elif delta == -1:
+            rel = "yesterday"
+        elif delta > 1:
+            rel = f"in {delta} days"
+        else:
+            rel = f"{abs(delta)} days ago"
+        has_time = dt.hour != 0 or dt.minute != 0
+        date_part = dt.strftime("%A, %B %d")
+        if has_time:
+            h = dt.hour % 12 or 12
+            ampm = "AM" if dt.hour < 12 else "PM"
+            time_part = f" at {h}:{dt.minute:02d} {ampm}"
+        else:
+            time_part = ""
+        return f"{date_part}{time_part} ({rel})"
+    except Exception:
+        return start_iso
+
+
+def handle_view_events(question: str, lang: str = "en") -> str:
+    """Return upcoming calendar events — live Google Calendar first, ChromaDB fallback."""
+    current_date = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
+    events_context = None
+    live_failed = False
+
+    # Always try live Google Calendar first
+    try:
+        events = get_upcoming_events(
+            days_ahead=CALENDAR_DAYS_AHEAD,
+            days_behind=CALENDAR_DAYS_BEHIND
         )
-        rag_docs = results
-    except Exception as e:
-        print(f"Calendar RAG retrieval failed: {e}")
-
-    if rag_docs:
-        context = "\n\n".join([doc.page_content for doc in rag_docs])
-        events_context = f"Today is: {current_date}\n\n{context}"
-    else:
-        # RAG empty or stale — hit Google Calendar directly
-        print("Calendar RAG empty — fetching live events")
-        try:
-            # Uses CALENDAR_DAYS_AHEAD and CALENDAR_DAYS_BEHIND from .env
-            events = get_upcoming_events(
-                days_ahead=CALENDAR_DAYS_AHEAD,
-                days_behind=CALENDAR_DAYS_BEHIND
-            )
-        except Exception as e:
-            print(f"Live calendar fetch failed: {e}")
-            return _t(
-                "I couldn't reach your Google Calendar right now — is the server online?",
-                "Ich konnte deinen Google Kalender nicht erreichen — ist der Server online?",
-                "No pude acceder a tu Google Calendar — ¿está el servidor activo?",
-                lang
-            )
-
         if not events:
             return _t(
                 "Nothing on your calendar for the next two weeks.",
@@ -1415,11 +1452,36 @@ def handle_view_events(question: str, lang: str = "en") -> str:
                 "Nada en tu calendario para las próximas dos semanas.",
                 lang
             )
-
-        lines = []
-        for e in events:
-            lines.append(f"- {e.title} on {e.start}")
+        lines = [f"- {e.title}: {_relative_event_label(e.start)}" for e in events]
         events_context = f"Today is: {current_date}\n\nUpcoming events:\n" + "\n".join(lines)
+    except Exception as e:
+        print(f"Live calendar fetch failed: {e} — falling back to ChromaDB")
+        live_failed = True
+
+    if live_failed:
+        try:
+            results = vectorstore.similarity_search(
+                question, k=5,
+                filter={"collection": "calendar"}
+            )
+            if results:
+                context = "\n\n".join([doc.page_content for doc in results])
+                events_context = f"Today is: {current_date}\n\n[Cached calendar data]\n\n{context}"
+            else:
+                return _t(
+                    "I couldn't reach your Google Calendar right now — is the server online?",
+                    "Ich konnte deinen Google Kalender nicht erreichen — ist der Server online?",
+                    "No pude acceder a tu Google Calendar — ¿está el servidor activo?",
+                    lang
+                )
+        except Exception as e2:
+            print(f"ChromaDB calendar fallback also failed: {e2}")
+            return _t(
+                "I couldn't reach your Google Calendar right now — is the server online?",
+                "Ich konnte deinen Google Kalender nicht erreichen — ist der Server online?",
+                "No pude acceder a tu Google Calendar — ¿está el servidor activo?",
+                lang
+            )
 
     format_prompt = f"""{_persona_prompt(lang)}
 
@@ -1442,32 +1504,30 @@ def handle_view_agenda(question: str, lang: str = "en") -> str:
     reminders = get_all_reminders()
     reminders_section = reminders if reminders != "No reminders found." else None
 
-    # ── Events: RAG first, live fallback ──
+    # ── Events: live Google Calendar first, ChromaDB fallback ──
     events_section = None
-    rag_docs = []
     try:
-        results = vectorstore.similarity_search(
-            question, k=5,
-            filter={"collection": "calendar"}
+        events = get_upcoming_events(
+            days_ahead=CALENDAR_DAYS_AHEAD,
+            days_behind=CALENDAR_DAYS_BEHIND
         )
-        rag_docs = results
-    except Exception as e:
-        print(f"Agenda calendar RAG failed: {e}")
-
-    if rag_docs:
-        events_section = "\n\n".join([doc.page_content for doc in rag_docs])
-    else:
-        try:
-            events = get_upcoming_events(
-                days_ahead=CALENDAR_DAYS_AHEAD,
-                days_behind=CALENDAR_DAYS_BEHIND
+        if events:
+            events_section = "\n".join(
+                f"- {e.title}: {_relative_event_label(e.start)}" for e in events
             )
-            if events:
-                events_section = "\n".join(
-                    f"- {e.title} on {e.start}" for e in events
+    except Exception as e:
+        print(f"Agenda live calendar fetch failed: {e} — falling back to ChromaDB")
+        try:
+            results = vectorstore.similarity_search(
+                question, k=5,
+                filter={"collection": "calendar"}
+            )
+            if results:
+                events_section = "[Cached] " + "\n\n".join(
+                    [doc.page_content for doc in results]
                 )
-        except Exception as e:
-            print(f"Agenda live calendar fetch failed: {e}")
+        except Exception as e2:
+            print(f"Agenda ChromaDB fallback also failed: {e2}")
 
     # ── Build combined context ──
     sections = []
@@ -1838,7 +1898,7 @@ def handle_confirmation(question: str, lang: str = "en") -> str:
             ingest_notes()
             _pending().clear()
             return _t(
-                "Done and dusted — added to your personal notes.",
+                "Done — added to your personal notes.",
                 "Erledigt — zu deinen persönlichen Notizen hinzugefügt.",
                 "Listo — añadido a tus notas personales.",
                 lang
@@ -2209,7 +2269,9 @@ def ask(question: str, mode: str = "auto", lang: str = "en", device_id: str = "a
     print(f"\nYou: {question} [mode: {mode}] [lang: {lang}] [device: {device_id}]")
     token = _current_device.set(device_id)
     try:
-        return _ask_internal(question, mode, lang)
+        answer = _ask_internal(question, mode, lang)
+        _record_turn(question, answer)
+        return answer
     except RateLimitError:
         print("❌ Groq rate limit reached")
         return _t(
@@ -2336,12 +2398,16 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
 def _handle_general(question: str, mode: str, lang: str) -> str:
     """Handle general questions via RAG or pure LLM."""
 
+    _memory_block = get_memory_block()
+    _episode_block = retrieve_episodes(question) if is_personal_query(question) else ""
+
     _general_prompt_base = (
         f"{_persona_prompt(lang)}\n\n"
         f"{_build_conversation_context()}"
         f"Answer the following question in 1-2 sentences.\n"
         f"- Always respond in {_LANG_NAMES.get(lang, 'English')}.\n"
-        f"- If the question refers to the previous exchange, use it.\n\n"
+        f"- If the question refers to the previous exchange, use it.\n"
+        f"{_memory_block}{_episode_block}\n\n"
         f"Question: {{question}}\n"
         f"Chatette:"
     )
@@ -2408,11 +2474,14 @@ def _rag_query(question: str, k_emails: int = 7, k_other: int = 5,
     tomorrow = (now + timedelta(days=1)).strftime("%A, %B %d, %Y")
     day_after = (now + timedelta(days=2)).strftime("%A, %B %d, %Y")
 
+    memory_block = get_memory_block()
+    episode_block = retrieve_episodes(question) if is_personal_query(question) else ""
+
     context = f"""Today is: {current_date}
 Tomorrow is: {tomorrow}
 The day after tomorrow is: {day_after}
 
-{_build_conversation_context()}{context}"""
+{_build_conversation_context()}{context}{memory_block}{episode_block}"""
 
     formatted_prompt = prompt_template.format(
         context=context, question=question,

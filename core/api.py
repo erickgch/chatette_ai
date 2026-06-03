@@ -27,6 +27,7 @@ os.environ["CHROMA_TELEMETRY"] = "false"
 from fastapi import FastAPI, Form, HTTPException, UploadFile, File, Header
 from scheduler import start_scheduler
 from rag_lw import ask, handle_reminder, handle_calendar_event, handle_delete, handle_delete_event, handle_draft, handle_personal_note, handle_weather, clear_device_context, clear_device_pending, device_has_pending, handle_set_alarm, get_last_alarm
+from memory.memory_router import router as memory_router
 import bulb_controller
 from chatette_tv import channel_registry as _channel_registry
 from chatette_tv.cast_router import router as cast_router
@@ -66,6 +67,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 app.include_router(cast_router, prefix="/cast")
+app.include_router(memory_router)
 
 
 # ===================================
@@ -490,7 +492,7 @@ async def _voice_chat_inner(file, lang, x_intent, x_device,
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         output_path = tmp.name
     subprocess.run(
-        [PIPER_PATH, "--model", piper_voice, "--length-scale", "1.2", "--output_file", output_path],
+        [PIPER_PATH, "--model", piper_voice, "--length-scale", "1.35", "--output_file", output_path],
         input=tts_text.encode("utf-8"),
         check=False,
     )

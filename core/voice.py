@@ -21,7 +21,7 @@ PIPER_VOICE = os.getenv("PIPER_VOICE")
 
 # Load Whisper model
 print("🎙️ Loading Whisper model...")
-whisper_model = WhisperModel("small", device="cpu", compute_type="int8")
+whisper_model = WhisperModel("small", device="cuda", compute_type="float16")
 print("✅ Whisper ready!")
 
 
@@ -96,7 +96,7 @@ def speak(text: str):
 
     # Call Piper executable
     subprocess.run(
-        [PIPER_PATH, "--model", PIPER_VOICE, "--output_file", output_path],
+        [PIPER_PATH, "--model", PIPER_VOICE, "--length-scale", "1.35", "--output_file", output_path],
         input=text.encode("utf-8"),
         check=True
     )

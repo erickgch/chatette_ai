@@ -10,6 +10,10 @@ cd /d "%~dp0"
 REM Activate virtual environment
 call .venv\Scripts\activate
 
+REM Add pip-installed CUDA DLLs to PATH so faster-whisper can find them
+set CUDA_DLLS=%~dp0.venv\Lib\site-packages\nvidia
+set PATH=%CUDA_DLLS%\cublas\bin;%CUDA_DLLS%\cudnn\bin;%CUDA_DLLS%\cuda_nvrtc\bin;%PATH%
+
 REM Check .env exists
 if not exist .env (
     echo  ERROR: .env file not found!
