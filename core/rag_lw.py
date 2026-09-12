@@ -97,18 +97,19 @@ def reload_llm():
 def llm_invoke(prompt: str) -> str:
     """Invoke LLM and always return a plain string."""
     try:
-        _prompt = prompt
-        if USE_GROQ and "qwen" in GROQ_MODEL.lower():
-            _prompt = prompt + " /no_think"
+        _is_qwen = (USE_GROQ and "qwen" in GROQ_MODEL.lower()) or \
+                   (not USE_GROQ and "qwen3" in OLLAMA_MODEL.lower())
+
+        _prompt = prompt + " /no_think" if _is_qwen else prompt
 
         response = llm.invoke(_prompt)
         text = response.content if hasattr(response, 'content') else str(response)
 
-        # Strip any <think>...</think> blocks
+        # Strip any <think>...</think> blocks (fallback in case /no_think is ignored)
         text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
 
         # Strip markdown bold/italic added by Qwen
-        if USE_GROQ and "qwen" in GROQ_MODEL.lower():
+        if _is_qwen:
             text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
             text = re.sub(r'\*(.+?)\*', r'\1', text)
 
