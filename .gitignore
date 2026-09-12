@@ -5,8 +5,19 @@
 .env
 token.pickle
 credentials.json
+*-credentials.json
 *.onnx
 *.onnx.json
+
+# Logs
+*.log
+service.log
+
+# Editor
+.vscode/
+
+# Runtime data
+core/memory/memory_store.json
 
 # All user data (notes, chroma_db, sync state, caches)
 data/

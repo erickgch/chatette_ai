@@ -24,6 +24,7 @@ from weather import (
     get_current_weather, get_today_forecast, get_weekly_forecast,
     format_weather_context, geocode
 )
+from places import search_places
 from pydantic import BaseModel, field_validator, ValidationError, ConfigDict
 from memory.summarizer import get_memory_block, retrieve_episodes, is_personal_query, run_summarizer
 from memory.memory_router import init_router
@@ -210,11 +211,10 @@ CHATETTE_PERSONA = """You are Chatette — a small robotic cat and personal assi
 About {user_name}: {user_profile}
 
 Your personality:
-- Warm, friendly and competent — like a smart friend who always has things under control.
+- Warm, friendly and competent — like a smart friend who always has things under control. 
+- Keep answers concise and straight to the point, while maintaining a friendly tone.
 - You have your own voice. Not a generic AI bot. Not a corporate assistant.
 - Diligent, accurate, but friendly. You answer first, add warmth second.
-- Occasionally use cool, casual phrases that feel natural — not forced.
-- Very rarely, a subtle cat hint slips through — natural, never cheesy.
 - Never over-explain or pad responses with unnecessary pleasantries.
 - Never apologize unnecessarily.
 - Always respond in {lang_name}."""
@@ -341,6 +341,7 @@ VALID_INTENTS = [
     "view_agenda",
     "view_emails",
     "get_weather",
+    "find_places",
     "about_chatette",
     "control_bulbs",
     "set_alarm",
@@ -476,10 +477,11 @@ Valid intents:
 - view_agenda: user wants a combined overview of reminders AND events — a quick picture of what is coming up (e.g. "what do I have going on?", "give me my agenda", "what's coming up this week?", "anything important soon?")
 - view_emails: user wants to see recent emails (e.g. "any new emails?", "check my inbox", "what emails did I get?", "did I get any emails?")
 - get_weather: user wants weather info (e.g. "what's the weather?", "will it rain today?", "forecast for Berlin")
+- find_places: user wants to find nearby places, venues or businesses (e.g. "good Chinese restaurant nearby", "find me a pharmacy", "any sushi places close by?", "recommend a cafe near me")
 - about_chatette: user is asking about Chatette (e.g. "who are you?", "what can you do?")
 - control_bulbs: user wants to control a smart light bulb (e.g. "turn on the lights", "dim to 50%", "set color to blue", "red lights on", "turn off the lamp")
 - set_alarm: user wants to set a countdown timer ("set a timer for 10 minutes", "remind me in 30 seconds") OR an alarm at a specific time ("set an alarm for 7 AM", "wake me up at 6:30", "alarm at 20:00")
-- cast_youtube: user wants to play a YouTube video on TV ("play Bonobo on YouTube", "put on some jazz on the TV", "cast this to the TV")
+- cast_youtube: user explicitly asks to play or cast something to the TV right now ("play Bonobo on YouTube", "put on some jazz on the TV", "cast this to the TV", "play Falling Down on YouTube"). Do NOT use this for wishes or statements like "I want to watch X" or "I'd like to see X" — those are general conversation.
 - cast_channel: user wants to watch a live TV channel ("I want to watch ARD", "put on ZDF", "turn on Euronews", "open Arte", "put on Milenio", "TV5 Monde", "NHK World")
 - cast_tv_power: user wants to turn the TV on or off ("turn on the TV", "turn off the TV", "switch the TV off")
 - cast_volume: user wants to change TV volume ("volume up", "volume down", "set volume to 40", "louder", "quieter", "mute")
@@ -500,6 +502,7 @@ IMPORTANT: If the user mentions multiple items of the same type, extract ALL of 
 - remove_from_list: {{"item": "item name", "list_name": "target list"}}
 - delete_list: {{"list_name": "list to delete"}}
 - get_weather: {{"city": "city name or empty for home", "timeframe": "now|today|tomorrow|week"}}
+- find_places: {{"place_type": "restaurant|cafe|bar|pharmacy|supermarket|museum|gym|...", "cuisine": "chinese|italian|japanese|... or empty"}}
 - view_emails: {{"max_results": 5}} — optional, default 5
 - control_bulbs: {{}}
 - set_alarm: for a countdown use {{"seconds": <total seconds>}}; for a specific time use {{"hour": <0-23>, "minute": <0-59>}}
@@ -535,6 +538,8 @@ Reply with ONLY a valid JSON object, nothing else:
 
     try:
         response = llm_invoke(prompt)
+        # Strip <think>...</think> blocks produced by reasoning models (e.g. Qwen3)
+        response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL)
         response = response[response.find("{"):response.rfind("}")+1]
         raw = json.loads(response)
 
@@ -1608,12 +1613,13 @@ def handle_cast_youtube(_question: str, extracted: dict, lang: str = "en") -> st
             return _t("YouTube search is not configured.", "YouTube-Suche ist nicht konfiguriert.", "La búsqueda de YouTube no está configurada.", lang)
         return _t("YouTube search is unavailable for today — the daily quota has been reached.", "Die YouTube-Suche ist heute nicht verfügbar — das Tageslimit wurde erreicht.", "La búsqueda de YouTube no está disponible hoy — se alcanzó el límite diario.", lang)
     query = extracted.get("query", _question)
-    result = _yt_search.search_video(query)
-    if result is None:
+    result = _yt_search.search_videos(query, max_results=1)
+    if result is None or not result["results"]:
         if _yt_search._quota_exceeded:
             return _t("YouTube search is unavailable for today — the daily quota has been reached.", "Die YouTube-Suche ist heute nicht verfügbar — das Tageslimit wurde erreicht.", "La búsqueda de YouTube no está disponible hoy — se alcanzó el límite diario.", lang)
         return _t("I couldn't find that on YouTube.", "Ich konnte das auf YouTube nicht finden.", "No encontré eso en YouTube.", lang)
-    video_id, title = result
+    video_id = result["results"][0]["video_id"]
+    title    = result["results"][0]["title"]
     ok = _cast_manager.play_youtube(video_id)
     if not ok:
         return _t("I couldn't reach the TV.", "Ich konnte den Fernseher nicht erreichen.", "No pude conectar con el televisor.", lang)
@@ -1764,6 +1770,61 @@ Keep it concise — highlight sender and subject, mention body only if relevant.
     return llm_invoke(format_prompt).strip()
 
 
+def handle_places(question: str, extracted: dict, lang: str = "en") -> str:
+    """Search OSM for nearby places and return a natural recommendation."""
+    place_type = extracted.get("place_type", "restaurant").strip().lower()
+    cuisine = extracted.get("cuisine", "").strip().lower() or None
+
+    try:
+        places = search_places(place_type, cuisine=cuisine)
+    except Exception as e:
+        print(f"⚠️ Places search error: {e}")
+        return _t(
+            "I couldn't search for places right now — try again in a moment.",
+            "Ich konnte gerade keine Orte suchen — versuch es gleich nochmal.",
+            "No pude buscar lugares en este momento — inténtalo de nuevo.",
+            lang
+        )
+
+    if not places:
+        query_desc = f"{cuisine} {place_type}" if cuisine else place_type
+        return _t(
+            f"I couldn't find any {query_desc} nearby.",
+            f"Ich konnte keine {query_desc} in der Nähe finden.",
+            f"No encontré ningún {query_desc} cerca.",
+            lang
+        )
+
+    # Format places for the LLM
+    places_text = ""
+    for i, p in enumerate(places[:3], 1):
+        dist = p["distance_m"]
+        dist_str = f"{dist}m" if dist < 1000 else f"{dist/1000:.1f}km"
+        line = f"{i}. {p['name']}"
+        if p["address"]:
+            line += f" — {p['address']}"
+        line += f" ({dist_str} away)"
+        if p["cuisine"]:
+            line += f" | cuisine: {p['cuisine']}"
+        if p["opening_hours"]:
+            line += f" | hours: {p['opening_hours']}"
+        places_text += line + "\n"
+
+    places_prompt = f"""{_persona_prompt(lang)}
+
+The user asked: "{question}"
+
+Here are the nearby places I found via OpenStreetMap:
+{places_text.strip()}
+
+Give 2-3 brief recommendations in Chatette's warm, conversational voice.
+For each place: mention the name, why it's a good match, and where it is.
+Keep the total response to 3-5 sentences. Do not mention OpenStreetMap.
+Respond in {_LANG_NAMES.get(lang, 'English')}."""
+
+    return llm_invoke(places_prompt).strip()
+
+
 def handle_weather(question: str, extracted: dict, lang: str = "en") -> str:
     """Fetch weather and return a natural Chatette-style response with time-of-day temperatures and qualitative wind descriptions."""
     city = extracted.get("city", "").strip()
@@ -1895,7 +1956,10 @@ def handle_confirmation(question: str, lang: str = "en") -> str:
 
         elif action == "personal_note":
             save_personal_note(reminder_text)
-            ingest_notes()
+            try:
+                ingest_notes()
+            except Exception as e:
+                print(f"⚠️ RAG ingestion failed after saving note: {e}")
             _pending().clear()
             return _t(
                 "Done — added to your personal notes.",
@@ -1908,7 +1972,10 @@ def handle_confirmation(question: str, lang: str = "en") -> str:
             items = _pending().items or []
             for item in items:
                 save_personal_note(item)
-            ingest_notes()
+            try:
+                ingest_notes()
+            except Exception as e:
+                print(f"⚠️ RAG ingestion failed after saving notes: {e}")
             _pending().clear()
             count = len(items)
             return _t(
@@ -2356,6 +2423,8 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
         answer = handle_view_agenda(question, lang)
     elif intent == "get_weather":
         answer = handle_weather(question, extracted, lang)
+    elif intent == "find_places":
+        answer = handle_places(question, extracted, lang)
     elif intent == "about_chatette":
         answer = handle_about_chatette(question, lang)
     elif intent == "control_bulbs":
