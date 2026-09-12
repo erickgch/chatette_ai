@@ -41,6 +41,7 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
 USE_GROQ = os.getenv("USE_GROQ", "false").lower() == "true"
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+THINKING_ENABLED = os.getenv("THINKING_ENABLED", "false").lower() == "true"
 
 # ── Calendar window — read from .env, set via app Settings ──────────────────
 CALENDAR_DAYS_AHEAD = int(os.getenv("CALENDAR_DAYS_AHEAD", "14"))
@@ -78,11 +79,12 @@ else:
 
 def reload_llm():
     """Hot-reload the LLM and calendar constants from .env (called after settings save)."""
-    global llm, USE_GROQ, GROQ_MODEL, OLLAMA_MODEL, CALENDAR_DAYS_AHEAD, CALENDAR_DAYS_BEHIND
+    global llm, USE_GROQ, GROQ_MODEL, OLLAMA_MODEL, THINKING_ENABLED, CALENDAR_DAYS_AHEAD, CALENDAR_DAYS_BEHIND
     load_dotenv(override=True)
     USE_GROQ = os.getenv("USE_GROQ", "false").lower() == "true"
     GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
     OLLAMA_MODEL = os.getenv("OLLAMA_MODEL")
+    THINKING_ENABLED = os.getenv("THINKING_ENABLED", "false").lower() == "true"
     CALENDAR_DAYS_AHEAD = int(os.getenv("CALENDAR_DAYS_AHEAD", "14"))
     CALENDAR_DAYS_BEHIND = int(os.getenv("CALENDAR_DAYS_BEHIND", "1"))
     if USE_GROQ:
@@ -100,7 +102,7 @@ def llm_invoke(prompt: str) -> str:
         _is_qwen = (USE_GROQ and "qwen" in GROQ_MODEL.lower()) or \
                    (not USE_GROQ and "qwen3" in OLLAMA_MODEL.lower())
 
-        _prompt = prompt + " /no_think" if _is_qwen else prompt
+        _prompt = prompt + " /no_think" if (_is_qwen and not THINKING_ENABLED) else prompt
 
         response = llm.invoke(_prompt)
         text = response.content if hasattr(response, 'content') else str(response)

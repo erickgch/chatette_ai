@@ -101,6 +101,7 @@ class SettingsRequest(BaseModel):
     email_days_window: int
     calendar_days_ahead: int
     calendar_days_behind: int
+    thinking_enabled: bool = False
 
 class ReminderResponse(BaseModel):
     index: int
@@ -751,6 +752,7 @@ def save_settings(request: SettingsRequest):
         email_days_window=request.email_days_window,
         calendar_days_ahead=request.calendar_days_ahead,
         calendar_days_behind=request.calendar_days_behind,
+        thinking_enabled=request.thinking_enabled,
     )
     success = write_settings(updated)
     if not success:

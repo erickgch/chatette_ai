@@ -22,6 +22,7 @@ class ChatetteSettings(BaseModel):
     email_days_window: int
     calendar_days_ahead: int
     calendar_days_behind: int
+    thinking_enabled: bool = False
 
     @field_validator("email_days_window", "calendar_days_ahead", "calendar_days_behind")
     @classmethod
@@ -50,6 +51,8 @@ def read_settings() -> ChatetteSettings:
 
     model_selection = groq_model if use_groq else "local"
 
+    thinking_enabled = os.getenv("THINKING_ENABLED", "false").lower() == "true"
+
     try:
         return ChatetteSettings(
             server_url=f"http://{_get_local_ip()}:8000",
@@ -59,6 +62,7 @@ def read_settings() -> ChatetteSettings:
             email_days_window=int(os.getenv("EMAIL_DAYS_WINDOW", "14")),
             calendar_days_ahead=int(os.getenv("CALENDAR_DAYS_AHEAD", "14")),
             calendar_days_behind=int(os.getenv("CALENDAR_DAYS_BEHIND", "1")),
+            thinking_enabled=thinking_enabled,
         )
     except ValidationError as e:
         print(f"⚠️ Settings validation error: {e}")
@@ -81,6 +85,9 @@ def write_settings(settings: ChatetteSettings) -> bool:
             content = _set_env_value(content, "USE_GROQ", "true")
             content = _set_env_value(content, "GROQ_MODEL", settings.model_selection)
 
+        content = _set_env_value(
+            content, "THINKING_ENABLED", "true" if settings.thinking_enabled else "false"
+        )
         content = _set_env_value(
             content, "EMAIL_DAYS_WINDOW", str(settings.email_days_window)
         )
