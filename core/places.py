@@ -30,6 +30,7 @@ _TYPE_MAP = {
     "hotel":          [('tourism', 'hotel')],
     "hostel":         [('tourism', 'hostel')],
     "museum":         [('tourism', 'museum')],
+    "church":         [('tourism', 'church')],    
     "park":           [('leisure', 'park')],
     "gym":            [('leisure', 'fitness_centre')],
     "cinema":         [('amenity', 'cinema')],

@@ -1,10 +1,12 @@
 import asyncio
 import os
 import re
+import sys
 import threading
 import tempfile
 import subprocess
 import uvicorn
+from datetime import datetime
 import scipy.signal as signal_proc  # type: ignore[import-untyped]
 import scipy.io.wavfile as wav_io  # type: ignore[import-untyped]
 import numpy as np
@@ -17,6 +19,42 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from pathlib import Path
 
+# ===================================
+# Session log
+# ===================================
+
+_LOG_DIR = Path(__file__).parent.parent / "logs"
+_LOG_DIR.mkdir(exist_ok=True)
+_SESSION_LOG_PATH = _LOG_DIR / f"chatette_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+_session_log_file = open(_SESSION_LOG_PATH, "w", encoding="utf-8", buffering=1)
+
+
+class _Tee:
+    """Write to both the original stream and the session log file."""
+    def __init__(self, original):
+        self._orig = original
+
+    def write(self, data):
+        self._orig.write(data)
+        try:
+            _session_log_file.write(data)
+        except Exception:
+            pass
+
+    def flush(self):
+        self._orig.flush()
+        try:
+            _session_log_file.flush()
+        except Exception:
+            pass
+
+    def __getattr__(self, attr):
+        return getattr(self._orig, attr)
+
+
+sys.stdout = _Tee(sys.stdout)
+sys.stderr = _Tee(sys.stderr)
+
 # Load .env before importing any module that reads env vars at import time (e.g. chromadb telemetry)
 load_dotenv(Path(__file__).parent.parent / ".env")
 
@@ -24,7 +62,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 os.environ["ANONYMIZED_TELEMETRY"] = "false"
 os.environ["CHROMA_TELEMETRY"] = "false"
 
-from fastapi import FastAPI, Form, HTTPException, UploadFile, File, Header
+from fastapi import FastAPI, Form, HTTPException, UploadFile, File, Header, Request
 from scheduler import start_scheduler
 from rag_lw import ask, handle_reminder, handle_calendar_event, handle_delete, handle_delete_event, handle_draft, handle_personal_note, handle_weather, clear_device_context, clear_device_pending, device_has_pending, handle_set_alarm, get_last_alarm
 from memory.memory_router import router as memory_router
@@ -50,12 +88,52 @@ except Exception:
 # Lifespan
 # ===================================
 
+def _start_notes_watcher():
+    """Watch data/notes/ for .txt changes and re-ingest automatically."""
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+
+    notes_dir = Path(__file__).parent.parent / "data" / "notes"
+    _debounce_timer: dict = {}
+
+    class _Handler(FileSystemEventHandler):
+        def on_modified(self, event):
+            if not event.is_directory and event.src_path.endswith(".txt"):
+                self._trigger()
+
+        def on_created(self, event):
+            if not event.is_directory and event.src_path.endswith(".txt"):
+                self._trigger()
+
+        def _trigger(self):
+            if "t" in _debounce_timer:
+                _debounce_timer["t"].cancel()
+            import threading as _t
+            timer = _t.Timer(2.0, _do_ingest)
+            _debounce_timer["t"] = timer
+            timer.start()
+
+    def _do_ingest():
+        try:
+            ingest_notes()
+            print("📝 Notes auto-ingested (file change detected)")
+        except Exception as e:
+            print(f"⚠️ Auto-ingest failed: {e}")
+
+    observer = Observer()
+    observer.schedule(_Handler(), str(notes_dir), recursive=False)
+    observer.daemon = True
+    observer.start()
+    print("👁️ Notes watcher started")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     scheduler_thread = threading.Thread(target=start_scheduler, daemon=True)
     scheduler_thread.start()
     print("🚀 Scheduler started in background")
     _channel_registry.init()
+    _start_notes_watcher()
     yield
     print("🛑 Shutting down...")
 
@@ -68,6 +146,18 @@ app = FastAPI(
 )
 app.include_router(cast_router, prefix="/cast")
 app.include_router(memory_router)
+
+# Allow the browser UI (chatette_web/index.html, opened from disk) to call the API.
+# expose_headers lets the page read the transcript/answer headers of /voice/chat.
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["X-Transcript", "X-Answer", "X-Awaiting-Confirm",
+                    "X-Timer-Seconds", "X-Alarm-Time", "X-Chatette-Busy"],
+)
 
 
 # ===================================
@@ -173,9 +263,24 @@ def root():
 @app.get("/status")
 def status():
     """Return server status and current LLM model."""
-    use_groq = os.getenv("USE_GROQ", "false").lower() == "true"
-    model = os.getenv("GROQ_MODEL") if use_groq else os.getenv("OLLAMA_MODEL")
+    model = os.getenv("OLLAMA_MODEL", "qwen3:8b")
     return {"status": "running", "model": model}
+
+
+@app.post("/logs/generate")
+def generate_log():
+    """Flush and return info about the current session log."""
+    try:
+        _session_log_file.flush()
+        size = _SESSION_LOG_PATH.stat().st_size
+        return {
+            "status": "ok",
+            "log_file": _SESSION_LOG_PATH.name,
+            "path": str(_SESSION_LOG_PATH),
+            "size_bytes": size,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/clear_context")
@@ -193,13 +298,49 @@ def clear_pending(x_device: str = Header("app", alias="X-Device")):
 
 
 # ===================================
+# Client identification (for the logs)
+# ===================================
+
+_DEVICE_NAMES = {"web": "Web app", "app": "Phone app", "s_phone": "FeTAp phone"}
+
+
+def _short_user_agent(ua: str) -> str:
+    """Condense a User-Agent header into e.g. 'Firefox on Windows' or 'Flutter/Dart'."""
+    if not ua:
+        return ""
+    if ua.startswith("Dart/"):
+        return "Flutter/Dart"
+    if ua.startswith("python-requests"):
+        return "Python requests"
+    browser = next((name for key, name in (("Edg/", "Edge"), ("OPR/", "Opera"), ("Firefox/", "Firefox"),
+                                           ("Chrome/", "Chrome"), ("Safari/", "Safari")) if key in ua), "")
+    system = next((name for key, name in (("Android", "Android"), ("iPhone", "iOS"), ("iPad", "iOS"),
+                                          ("Windows", "Windows"), ("Mac OS", "macOS"), ("Linux", "Linux"))
+                   if key in ua), "")
+    if browser:
+        return f"{browser} on {system}" if system else browser
+    return ua.split(" ")[0][:40]
+
+
+def _client_label(http: Request, device: str | None) -> str:
+    """Who sent this request: friendly name, device id, IP address and client software."""
+    ip = http.client.host if http.client else "?"
+    agent = _short_user_agent(http.headers.get("user-agent", ""))
+    if not device and agent == "Flutter/Dart":
+        name = "Phone app"            # the app's shortcut buttons send no X-Device header
+    else:
+        name = _DEVICE_NAMES.get(device or "", device or "unknown client")
+    return f"{name} [{device or '-'}] from {ip}" + (f", {agent}" if agent else "")
+
+
+# ===================================
 # Chat
 # ===================================
 
 @app.post("/chat", response_model=AnswerResponse)
-def chat(request: QuestionRequest, x_device: str = Header("app", alias="X-Device")):
+def chat(request: QuestionRequest, http: Request, x_device: str = Header("app", alias="X-Device")):
     """Send a text message and get a response."""
-    print(f"📱 Received: question='{request.question}' mode='{request.mode}' device='{x_device}'")
+    print(f"📱 Received from {_client_label(http, x_device)}: question='{request.question}' mode='{request.mode}'")
     if not request.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty")
     if request.mode not in ["auto", "personal", "general"]:
@@ -220,7 +361,7 @@ def chat(request: QuestionRequest, x_device: str = Header("app", alias="X-Device
 # ===================================
 
 @app.post("/command", response_model=AnswerResponse)
-def command(request: CommandRequest):
+def command(request: CommandRequest, http: Request, x_device: str = Header(None, alias="X-Device")):
     """
     Execute a hardcoded command directly, bypassing LLM intent classification.
     Used by app shortcut buttons to avoid token cost and latency of classification.
@@ -228,6 +369,7 @@ def command(request: CommandRequest):
     cmd = request.command.strip().lower()
     payload = request.payload.strip()
     lang = request.lang
+    print(f"📱 Command from {_client_label(http, x_device)}: command='{cmd}' payload='{payload}'")
 
     # Build a synthetic question from command + payload for context
     question = payload if payload else cmd
@@ -250,23 +392,10 @@ def command(request: CommandRequest):
             answer = handle_personal_note(question, extracted, lang)
 
         elif cmd == "weather":
-            # Parse free-form payload — separate city from timeframe keywords
-            timeframe = "today"
-            city = payload.strip()
-            # Strip leading prepositions ("weather in London" → "London")
-            city = re.sub(r"^(in|for|at|near)\s+", "", city, flags=re.IGNORECASE).strip()
-            timeframe_keywords = {
-                "tomorrow": ["tomorrow", "morgen", "mañana"],
-                "now":      ["now", "current", "currently", "jetzt", "aktuell", "ahora"],
-                "week":     ["this week", "week", "woche", "semana", "7 days"],
-            }
-            for tf, keywords in timeframe_keywords.items():
-                for kw in keywords:
-                    if kw in city.lower():
-                        timeframe = tf
-                        city = re.sub(rf"\b{re.escape(kw)}\b", "", city, flags=re.IGNORECASE).strip(" ,")
-                        break
-            extracted = {"city": city.strip(), "timeframe": timeframe}
+            # Free-form payload, e.g. "for the next 3 days in Cologne" → city + timeframe
+            from weather import parse_weather_request
+            city, timeframe = parse_weather_request(payload)
+            extracted = {"city": city, "timeframe": timeframe}
             answer = handle_weather(question, extracted, lang)
 
         elif cmd == "delete_reminder":
@@ -304,8 +433,10 @@ def command(request: CommandRequest):
 # ===================================
 
 @app.post("/voice/transcribe")
-async def transcribe_audio(file: UploadFile = File(...)):
+async def transcribe_audio(http: Request, file: UploadFile = File(...),
+                           x_device: str = Header(None, alias="X-Device")):
     """Receive audio file, transcribe and return text."""
+    print(f"🎤 Transcription request from {_client_label(http, x_device)}")
     from voice import whisper_model
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp.write(await file.read())
@@ -353,6 +484,7 @@ _EMPTY_TRANSCRIPT_MSG = {
 
 @app.post("/voice/chat")
 async def voice_chat(
+    http: Request,
     file: UploadFile = File(...),
     lang: str = Form("en"),
     x_intent: str = Header(None, alias="X-Intent"),
@@ -361,6 +493,8 @@ async def voice_chat(
     x_alarm_time:    str = Header(None, alias="X-Alarm-Time"),
     x_skip_whisper:  str = Header(None, alias="X-Skip-Whisper"),
 ):
+    print(f"🎤 Voice message from {_client_label(http, x_device)}"
+          + (f" (button intent: {x_intent})" if x_intent else ""))
     if _processing_lock.locked():
         raise HTTPException(status_code=503, headers={"X-Chatette-Busy": "true"},
                             detail="Chatette is busy — please try again in a moment.")
@@ -473,7 +607,7 @@ async def _voice_chat_inner(file, lang, x_intent, x_device,
             mode = x_intent
         if mode in ("bulb_on", "bulb_off"):
             mode = "control_bulbs"
-        answer = ask(transcript, mode=mode, lang=tts_lang, device_id=x_device)
+        answer = ask(transcript, mode=mode, lang=tts_lang, device_id=x_device, voice=True)
 
     # Strip emojis before TTS (they appear in text but should not be spoken)
     import unicodedata
@@ -747,8 +881,6 @@ def save_settings(request: SettingsRequest):
     updated = ChatetteSettings(
         server_url=current.server_url,
         model_selection=request.model_selection,
-        use_groq=request.model_selection != "local",
-        groq_model=request.model_selection if request.model_selection != "local" else current.groq_model,
         email_days_window=request.email_days_window,
         calendar_days_ahead=request.calendar_days_ahead,
         calendar_days_behind=request.calendar_days_behind,

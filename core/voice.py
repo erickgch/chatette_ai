@@ -112,7 +112,7 @@ def speak(text: str):
 # ===== Voice Chat Loop =====
 def voice_chat():
     """Full voice conversation loop."""
-    from rag import ask
+    from rag_lw import ask
 
     speak("Hello! I am Chatette. How can I help you?")
 
@@ -130,7 +130,7 @@ def voice_chat():
                 break
 
             # Get answer from RAG
-            answer = ask(transcript)
+            answer = ask(transcript, device_id="pc_voice", voice=True)
 
             # Speak the answer
             speak(answer)

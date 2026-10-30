@@ -1,0 +1,74 @@
+CHATETTE — PIPELINE AND WORKFLOW
+================================
+
+
+1. THE BIG PICTURE
+------------------
+
+ CLIENTS                          BACKEND  (PC, FastAPI on :8000)                     EXTERNAL / LOCAL SERVICES
+ -------                          ------------------------------                     -------------------------
+ Phone app (Flutter) -+
+ Web app (browser)  --+- HTTP ->  api.py --> rag_lw.py  (the "brain")  --> Ollama: qwen2.5:7b (LLM)
+ FeTAp / Pi (voice) --+            |            |                       --> Ollama: mxbai-embed-large (embeddings)
+                                   |            +-> handlers -----------> Google Calendar / Gmail
+                                   |            |                       --> Open-Meteo (weather), OSM (places)
+                                   |            |                       --> Smart bulb, Chromecast/TV
+                                   |            +-> ChromaDB (RAG) + memory
+                                   +-> voice: Whisper (speech->text), Piper (text->speech)
+                                   +-> scheduler.py (background syncs) --> ingestion.py --> ChromaDB
+
+
+2. A TEXT MESSAGE, STEP BY STEP  (POST /chat)
+---------------------------------------------
+
+ "when is my birthday?"  (mode: auto | personal | general, device: web/app/s_phone)
+   |
+   v
+ api.py /chat --> rag_lw.ask()  -- sets device context (per-device conversation + pending state)
+   |
+   v
+ _ask_internal()
+   1.  Pending question?  -- yes --> draft flow (handle_draft_followup) or yes/no (handle_confirmation)
+   |   no
+   2.  classify_intent()  -- 1 LLM call -> {intent, confidence, extracted data}
+   2a. Guard: question/statement without "remind/add/save..." -> not a save action
+   2b. Phone key override (FeTAp buttons force an intent)
+   2c. Personal mode: read-only intents -> personal-data path
+   3.  Low confidence on an action -> "could you rephrase?"
+   4.  Dispatch to ONE handler:
+        +- actions:  reminder, calendar event, list, journal note, draft, alarm, bulbs, TV
+        |            (most end in a confirmation question -> saved as "pending")
+        +- lookups:  view events/reminders/agenda/emails, weather, places, about Chatette
+        +- general:  _handle_general --+- general mode  -> LLM (+ relevant calendar)
+                                       +- personal mode -> RAG
+                                       +- auto          -> RAG if a chunk is relevant (<= 0.93), else LLM
+   |
+   v
+ RAG (_rag_query):  search each collection (top-k) -> pool -> sort by relevance -> dedupe
+                    -> fill 2,400 chars best-first -> + date facts + memory -> prompt -> LLM
+   |
+   v
+ answer --> _record_turn() (every 20 turns -> memory summarizer) --> client
+
+
+3. VOICE  (POST /voice/chat — app voice screen and the FeTAp)
+-------------------------------------------------------------
+
+ audio (WAV) --> Whisper (GPU, "small") --> transcript --> same ask() pipeline as in section 2
+             --> answer --> emojis stripped --> Piper TTS (en/de/es voice) --> resample 48 kHz --> WAV back
+             response headers: X-Transcript, X-Answer, X-Awaiting-Confirm, timer/alarm
+
+ FeTAp side (chatette_phone/): records until 1.8 s of silence, handles the keypad buttons
+ (intents, confirm/cancel, language) and plays the reply.
+
+
+4. BACKGROUND WORK  (never triggered by a message)
+--------------------------------------------------
+
+ scheduler.py (thread started by api.py)
+   +- every 15 min:  calendar sync + email sync --> ingestion.py --> ChromaDB  (only changed chunks)
+   +- daily 08:00:   notification texts (LLM) --> data/notes/notifications_cache.json --> phone app
+   +- notes folder watcher --> re-ingest notes & lists on file change
+
+ ingestion.py:  fetch source --> split (512 chars / 50 overlap) --> clean (drop empty chunks)
+                --> stable content IDs --> add new / delete vanished --> ChromaDB

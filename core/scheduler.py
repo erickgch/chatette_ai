@@ -20,26 +20,43 @@ class NotesChangeHandler(FileSystemEventHandler):
     def on_modified(self, event):
         if not event.is_directory:
             print(f"\n📝 Notes changed: {event.src_path} — re-ingesting...")
-            ingest_notes()
-            ingest_lists()
+            _run_job("Notes ingestion", lambda: (ingest_notes(), ingest_lists()))
             print("✅ Notes re-ingested!")
 
     def on_created(self, event):
         if not event.is_directory:
             print(f"\n📝 New note detected: {event.src_path} — ingesting...")
-            ingest_notes()
-            ingest_lists()
+            _run_job("Notes ingestion", lambda: (ingest_notes(), ingest_lists()))
             print("✅ Notes ingested!")
 
 
 # ===== Scheduled Jobs =====
+# Jobs must never raise: an exception escaping into schedule.run_pending() kills the
+# scheduler thread, and with it every later sync until the backend restarts.
+
+def _is_offline_error(e: Exception) -> bool:
+    text = f"{type(e).__name__} {e}".lower()
+    return any(s in text for s in ("getaddrinfo", "nameresolution", "connectionerror",
+                                   "max retries", "timed out", "timeout", "unreachable"))
+
+
+def _run_job(label: str, fn) -> None:
+    try:
+        fn()
+    except Exception as e:
+        if _is_offline_error(e):
+            print(f"⚠️ {label} skipped — no connection to Google. Keeping the last synced data; retrying next run.")
+        else:
+            print(f"❌ {label} failed: {type(e).__name__}: {e}")
+
+
 def sync_calendar():
     print(f"\n📅 [{datetime.now().strftime('%H:%M')}] Syncing Google Calendar...")
-    ingest_calendar_events()
+    _run_job("Calendar sync", ingest_calendar_events)
 
 def sync_emails():
     print(f"\n📧 [{datetime.now().strftime('%H:%M')}] Syncing Gmail...")
-    ingest_emails()
+    _run_job("Email sync", ingest_emails)
 
 def sync_all():
     sync_calendar()
@@ -49,7 +66,7 @@ def generate_notifications_cache():
     """Generate LLM notification texts and store for phone to fetch."""
     print(f"\n🔔 [{datetime.now().strftime('%H:%M')}] Generating notifications cache...")
     try:
-        from rag import llm_invoke
+        from rag_lw import llm_invoke
         from note_manager import get_all_reminders
         from google_integration import get_upcoming_events
         import json
@@ -157,7 +174,10 @@ def start_scheduler():
 
     try:
         while True:
-            schedule.run_pending()
+            try:
+                schedule.run_pending()
+            except Exception as e:  # last line of defence — keep the loop alive
+                print(f"❌ Scheduled job crashed: {type(e).__name__}: {e}")
             time.sleep(10)
     except KeyboardInterrupt:
         print("\n🛑 Scheduler stopped.")

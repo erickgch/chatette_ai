@@ -170,6 +170,14 @@ def delete_reminder_by_index(index: int) -> str:
     return f"Deleted: {removed.text}"
 
 
+def delete_all_reminders() -> int:
+    """Delete every reminder. Returns how many were removed."""
+    items = _read_reminders()
+    _write_reminders([])
+    print(f"🗑️ Deleted all reminders ({len(items)})")
+    return len(items)
+
+
 def get_all_reminders() -> str:
     """Read all reminders as a formatted string (for LLM context)."""
     items = _read_reminders()
@@ -244,8 +252,13 @@ def delete_personal_notes() -> None:
 # Drafts
 # ==========================
 
-def save_draft(title: str, content: str) -> str:
-    """Validate and save a draft to the drafts folder."""
+def save_draft(title: str, content: str, filename: str | None = None) -> str:
+    """Validate and save a draft to the drafts folder.
+
+    If `filename` is given (the user named the document), that name is used as-is
+    with a .txt extension; an existing file is never overwritten — a _2, _3, …
+    suffix is added instead. Otherwise the name is derived from the title.
+    """
     try:
         item = DraftItem(
             title=title,
@@ -256,12 +269,24 @@ def save_draft(title: str, content: str) -> str:
         print(f"⚠️ Invalid draft — aborting: {e}")
         return ""
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    clean_title = "".join(c if c.isalnum() or c in " _-" else "" for c in item.title)
-    clean_title = clean_title.strip().replace(" ", "_").lower()[:40]
-    if not clean_title:
-        clean_title = "draft"
-    filename = f"{clean_title}_{timestamp}.txt"
+    requested = ""
+    if filename:
+        stem = os.path.splitext(os.path.basename(filename.strip()))[0]
+        requested = "".join(c if c.isalnum() or c in " _-." else "" for c in stem).strip().replace(" ", "_")[:80]
+
+    if requested:
+        filename = f"{requested}.txt"
+        n = 2
+        while os.path.exists(os.path.join(DRAFTS_PATH, filename)):
+            filename = f"{requested}_{n}.txt"
+            n += 1
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        clean_title = "".join(c if c.isalnum() or c in " _-" else "" for c in item.title)
+        clean_title = clean_title.strip().replace(" ", "_").lower()[:40]
+        if not clean_title:
+            clean_title = "draft"
+        filename = f"{clean_title}_{timestamp}.txt"
     filepath = os.path.join(DRAFTS_PATH, filename)
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(f"Draft: {item.title}\n")

@@ -1,5 +1,9 @@
 # ingest absorbs the information in the database, i.e., the source text files
 import os
+import re
+import html
+import time
+import hashlib
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
@@ -104,137 +108,194 @@ vectorstore = Chroma(
 # ==========================
 # Text splitters
 # ==========================
+CHUNK_SIZE = 512
+CHUNK_OVERLAP = 50
+
 text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=500,
-    chunk_overlap=50
+    chunk_size=CHUNK_SIZE,
+    chunk_overlap=CHUNK_OVERLAP
 )
 
-email_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=330,
-    chunk_overlap=30
-)
+
+def _strip_html(text: str) -> str:
+    """Turn an HTML email body into plain text (drop head/style/script, tags, entities)."""
+    if "<" not in text or not re.search(r"<\s*(html|head|body|div|p|br|table|meta|span|!doctype)\b", text, re.I):
+        return text
+    text = re.sub(r"(?is)<(head|style|script)\b.*?</\1>", " ", text)
+    text = re.sub(r"(?s)<!--.*?-->", " ", text)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    text = re.sub(r"<[^>]*$", " ", text)          # tag cut off by truncation
+    text = html.unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+# ==========================
+# Chunk cleaner
+# ==========================
+MIN_CONTENT_CHARS = 10   # letters or digits — numbers count, e.g. "06.09.26: 6,7 km."
+_TAG_LINE = re.compile(r"^\s*\[[^\]\n]{1,40}\]\s*$", re.M)          # [Email], [Calendar Event]
+_EMPTY_LABEL_LINE = re.compile(r"^\s*[\w ]{1,30}:\s*$", re.M | re.U)  # "Body:", "Description:"
+
+
+def _has_content(text: str) -> bool:
+    """True if the chunk says something beyond labels, tags and markup."""
+    text = _TAG_LINE.sub(" ", text)
+    text = _EMPTY_LABEL_LINE.sub(" ", text)
+    text = re.sub(r"<[^>]*>?", " ", text)
+    return sum(ch.isalnum() for ch in text) >= MIN_CONTENT_CHARS
+
+
+def _clean_chunks(chunks: list[Document]) -> tuple[list[Document], int]:
+    """Drop chunks without real content (e.g. a lone "Body:" or an HTML fragment)."""
+    kept = [c for c in chunks if _has_content(c.page_content)]
+    return kept, len(chunks) - len(kept)
+
+
+# ==========================
+# Incremental sync
+# ==========================
+# Every chunk gets a stable ID derived from its content. A sync only adds chunks that are
+# new and deletes chunks that disappeared — unchanged chunks are never touched.
+#
+# Why: the old "delete everything, re-add everything" approach ran every 15 minutes.
+# Chroma's HNSW index only *marks* deleted vectors, so after months it held 23,633
+# entries for 38 live chunks, and filtered searches failed ("ef or M is too small")
+# — notes became unreachable and calendar searches returned a single chunk.
+
+def _chunk_id(chunk: Document) -> str:
+    meta = chunk.metadata
+    key = f"{meta.get('collection')}\x1f{meta.get('source_file')}\x1f{chunk.page_content}"
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()
+
+
+def _sync_chunks(collection: str, chunks: list[Document], source_file: str | None = None) -> None:
+    """Make the stored chunks of `collection` (or of one source file in it) equal `chunks`."""
+    where = {"collection": collection}
+    if source_file:
+        where = {"$and": [{"collection": collection}, {"source_file": source_file}]}
+    existing_ids = set(vectorstore.get(where=where)["ids"])
+
+    chunks, dropped = _clean_chunks(chunks)
+    wanted: dict[str, Document] = {}
+    for chunk in chunks:
+        wanted.setdefault(_chunk_id(chunk), chunk)   # identical chunks collapse into one
+
+    to_delete = list(existing_ids - wanted.keys())
+    to_add = [cid for cid in wanted if cid not in existing_ids]
+
+    if to_delete:
+        vectorstore.delete(ids=to_delete)
+    if to_add:
+        # Retry up to 3 times — Ollama may be busy with the LLM and need a moment to swap models
+        for attempt in range(3):
+            try:
+                vectorstore.add_documents([wanted[cid] for cid in to_add], ids=to_add)
+                break
+            except ConnectionError:
+                if attempt < 2:
+                    print(f"Embedding connection failed, retrying in 3s (attempt {attempt + 1}/3)...")
+                    time.sleep(3)
+                else:
+                    raise
+
+    scope = f"{collection}/{source_file}" if source_file else collection
+    print(f"🔄 {scope}: +{len(to_add)} added, -{len(to_delete)} removed, "
+          f"{len(wanted) - len(to_add)} unchanged" + (f", {dropped} empty chunk(s) skipped" if dropped else ""))
 
 
 # ==========================
 # File ingestion
 # ==========================
-def ingest_file(filepath: str, collection: str = "documents"):
-    """Ingest a single file into the vector store."""
-    path = Path(filepath)
-
+def _file_chunks(path: Path, collection: str) -> list[Document]:
+    """Load and split one file into chunks tagged with collection/source metadata."""
     if not path.exists():
-        print(f"File not found: {filepath}")
-        return
-
+        print(f"File not found: {path}")
+        return []
     if path.stat().st_size == 0:
         print(f"⚠️ Skipping empty file: {path.name}")
-        return
-
-    content = path.read_text(encoding="utf-8").strip()
-    if not content:
-        print(f"⚠️ Skipping blank file: {path.name}")
-        return
-
-    print(f"Ingesting {path.name}...")
+        return []
 
     if path.suffix.lower() == ".pdf":
         loader = PyPDFLoader(str(path))
     elif path.suffix.lower() in [".txt", ".md"]:
+        if not path.read_text(encoding="utf-8").strip():
+            print(f"⚠️ Skipping blank file: {path.name}")
+            return []
         loader = TextLoader(str(path), encoding="utf-8")
     else:
         print(f"Unsupported file type: {path.suffix}")
-        return
+        return []
 
-    documents = loader.load()
-    chunks = text_splitter.split_documents(documents)
+    chunks = text_splitter.split_documents(loader.load())
+    return [c for c in chunks if _apply_chunk_metadata(c, collection, path.name)]
 
-    valid_chunks = []
-    for chunk in chunks:
-        if _apply_chunk_metadata(chunk, collection, path.name):
-            valid_chunks.append(chunk)
 
-    if valid_chunks:
-        vectorstore.add_documents(valid_chunks)
+def ingest_file(filepath: str, collection: str = "documents"):
+    """Ingest (or re-sync) a single file into the vector store."""
+    path = Path(filepath)
+    _sync_chunks(collection, _file_chunks(path, collection), source_file=path.name)
 
 
 # ==========================
 # Documents ingestion
 # ==========================
 def ingest_all_documents():
-    """Ingest all files in the documents folder."""
+    """Sync all files in the documents folder."""
+    if not DOCUMENTS_PATH:
+        print("DOCUMENTS_PATH not set in .env — skipping documents.")
+        return
     docs_path = Path(DOCUMENTS_PATH)
 
     if not docs_path.exists():
         print("Documents folder not found.")
         return
 
+    chunks = []
     for file in docs_path.iterdir():
         if file.is_file():
-            ingest_file(str(file), collection="documents")
+            chunks += _file_chunks(file, "documents")
+    _sync_chunks("documents", chunks)
 
 
 # ==========================
 # Notes ingestion
 # ==========================
 def ingest_notes():
-    """Ingest all notes (reminders, personal notes, drafts), replacing old ones."""
-
-    existing = vectorstore.get(where={"collection": "notes"})
-    if existing and existing["ids"]:
-        vectorstore.delete(ids=existing["ids"])
-
+    """Sync all notes (reminders, personal notes, drafts)."""
     notes_path = Path(NOTES_PATH)
     if not notes_path.exists():
         print("Notes folder not found.")
         return
 
+    chunks = []
     for file in notes_path.iterdir():
         if file.is_file() and file.suffix in ('.txt', '.md'):
-            ingest_file(str(file), collection="notes")
+            chunks += _file_chunks(file, "notes")
 
     drafts_path = notes_path / "drafts"
     if drafts_path.exists():
         for file in drafts_path.iterdir():
             if file.is_file():
-                ingest_file(str(file), collection="notes")
+                chunks += _file_chunks(file, "notes")
+
+    _sync_chunks("notes", chunks)
 
 
 # ==========================
 # Lists ingestion
 # ==========================
 def ingest_lists():
-    """Ingest all list files, replacing old ones."""
-
-    existing = vectorstore.get(where={"collection": "lists"})
-    if existing and existing["ids"]:
-        vectorstore.delete(ids=existing["ids"])
-
+    """Sync all list files."""
     lists_path = Path(NOTES_PATH) / "lists"
     if not lists_path.exists():
         print("Lists folder not found — skipping.")
         return
 
+    chunks = []
     for file in lists_path.iterdir():
         if file.is_file() and file.suffix == ".txt":
-            if file.stat().st_size == 0:
-                print(f"⚠️ Skipping empty list: {file.name}")
-                continue
-            content = file.read_text(encoding="utf-8").strip()
-            if not content:
-                continue
-
-            print(f"Ingesting list: {file.name}...")
-            loader = TextLoader(str(file), encoding="utf-8")
-            documents = loader.load()
-            chunks = text_splitter.split_documents(documents)
-
-            valid_chunks = []
-            for chunk in chunks:
-                if _apply_chunk_metadata(chunk, "lists", file.name):
-                    valid_chunks.append(chunk)
-
-            if valid_chunks:
-                vectorstore.add_documents(valid_chunks)
+            chunks += _file_chunks(file, "lists")
+    _sync_chunks("lists", chunks)
 
 
 # ==========================
@@ -243,11 +304,7 @@ def ingest_lists():
 def ingest_calendar_events():
     """Fetch and ingest upcoming calendar events."""
 
-    existing = vectorstore.get(where={"collection": "calendar"})
-    if existing and existing["ids"]:
-        vectorstore.delete(ids=existing["ids"])
-        print(f"🗑️ Cleared {len(existing['ids'])} old calendar chunks")
-
+    # Fetch first: if Google is unreachable this raises and the old chunks stay in place.
     events = get_upcoming_events(
         days_ahead=CALENDAR_DAYS_AHEAD,
         days_behind=CALENDAR_DAYS_BEHIND
@@ -255,7 +312,6 @@ def ingest_calendar_events():
 
     if not events:
         print("No calendar events found.")
-        return
 
     documents = []
 
@@ -264,14 +320,14 @@ def ingest_calendar_events():
         start = human_datetime(event_dict.get("start"))
         end = human_datetime(event_dict.get("end"))
 
+        description = (event_dict.get('description') or '').strip()
         text = f"""
 [Calendar Event]
 
 Title: {event_dict.get('title')}
 Start: {start}
 End: {end}
-Description: {event_dict.get('description', '')}
-"""
+""" + (f"Description: {description}\n" if description else "")
 
         doc = Document(
             page_content=text.strip(),
@@ -280,8 +336,7 @@ Description: {event_dict.get('description', '')}
         if _apply_chunk_metadata(doc, "calendar", "google_calendar"):
             documents.append(doc)
 
-    chunks = text_splitter.split_documents(documents)
-    vectorstore.add_documents(chunks)
+    _sync_chunks("calendar", text_splitter.split_documents(documents))
 
 
 # ==========================
@@ -290,46 +345,34 @@ Description: {event_dict.get('description', '')}
 def ingest_emails():
     """Fetch and ingest recent emails."""
 
-    existing = vectorstore.get(where={"collection": "emails"})
-    if existing and existing["ids"]:
-        vectorstore.delete(ids=existing["ids"])
-        print(f"🗑️ Cleared {len(existing['ids'])} old email chunks")
-
+    # Fetch first: if Gmail is unreachable this raises and the old chunks stay in place.
     emails = get_recent_emails(days_window=EMAIL_DAYS_WINDOW)
 
     if not emails:
         print("No emails found.")
-        return
 
-    documents = []
+    chunks = []
 
     for email in emails:
         date = human_datetime(email.date)
+        header = f"[Email]\nFrom: {email.from_}\nDate: {date}\nSubject: {email.subject}"
+        body = _strip_html(email.body or "").strip()[:400]
 
-        body = email.body
-        if body:
-            body = body.strip()[:400]
+        # Split only the body and repeat the header in every chunk, so each chunk still
+        # says who sent it and what it is about (previously the header and the body
+        # landed in separate chunks). Every chunk stays within CHUNK_SIZE.
+        body_room = max(CHUNK_SIZE - len(header) - len("\nBody: "), 100)
+        body_parts = RecursiveCharacterTextSplitter(
+            chunk_size=body_room, chunk_overlap=min(CHUNK_OVERLAP, body_room // 4)
+        ).split_text(body) if body else []
 
-        text = f"""
-[Email]
+        for part in body_parts or [""]:
+            text = f"{header}\nBody: {part}" if part else header
+            doc = Document(page_content=text, metadata={})
+            if _apply_chunk_metadata(doc, "emails", "gmail"):
+                chunks.append(doc)
 
-From: {email.from_}
-Date: {date}
-Subject: {email.subject}
-
-Body:
-{body}
-"""
-
-        doc = Document(
-            page_content=text.strip(),
-            metadata={}
-        )
-        if _apply_chunk_metadata(doc, "emails", "gmail"):
-            documents.append(doc)
-
-    chunks = email_splitter.split_documents(documents)
-    vectorstore.add_documents(chunks)
+    _sync_chunks("emails", chunks)
 
 
 # ==========================

@@ -1,4 +1,5 @@
 import os
+import re
 import requests
 from datetime import datetime
 from pathlib import Path
@@ -50,6 +51,62 @@ def _clean_city_input(city: str) -> str:
     return city
 
 
+_NUMBER_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "ein": 1, "einen": 1, "zwei": 2, "drei": 3, "vier": 4, "fünf": 5, "sechs": 6, "sieben": 7,
+    "un": 1, "uno": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5, "seis": 6, "siete": 7,
+}
+_DAYS_RE = re.compile(
+    r"\b(?:(?:the|die|los)\s+)?(?:next|coming|nächsten|kommenden|próximos|proximos)?\s*"
+    r"(\d+|" + "|".join(_NUMBER_WORDS) + r")\s*(?:days?|tagen?|d[ií]as)\b",
+    re.IGNORECASE)
+_TIMEFRAME_PATTERNS = [
+    ("now", r"\b(?:right now|now|currently|current|jetzt|gerade|aktuell|ahora)\b"),
+    ("tomorrow", r"\b(?:tomorrow|morgen|mañana|manana)\b"),
+    ("week", r"\b(?:(?:this |next |the )?week(?:end)?|wochenende|woche|fin de semana|semana)\b"),
+    ("today", r"\b(?:today|tonight|heute|hoy|esta noche)\b"),
+]
+# Words that are never part of a place name in a weather request
+_WEATHER_FILLER = re.compile(
+    r"\b(?:weather|forecast|wetter|vorhersage|clima|tiempo|pronóstico|what's|whats|what|is|it|like|"
+    r"how|will|be|for|über|für|das|el|la|para|de|del|please|bitte|por favor)\b",
+    re.IGNORECASE)
+
+
+def parse_weather_request(text: str) -> tuple[str, str]:
+    """
+    Split a free-form weather request into (city, timeframe), e.g.
+      "for the next 3 days in Cologne" → ("Cologne", "3 days")
+      "Berlin tomorrow"                → ("Berlin", "tomorrow")
+      "for the next 3 days"            → ("", "3 days")   (empty city = home)
+    timeframe is one of: now, today, tomorrow, week, "<N> days".
+    """
+    s = " " + text.strip() + " "
+    timeframe = "today"
+
+    m = _DAYS_RE.search(s)
+    if m:
+        raw = m.group(1).lower()
+        n = int(raw) if raw.isdigit() else _NUMBER_WORDS[raw]
+        timeframe = "today" if n <= 1 else "week" if n >= 7 else f"{n} days"
+        s = s[:m.start()] + " " + s[m.end():]
+    else:
+        for tf, pattern in _TIMEFRAME_PATTERNS:
+            if re.search(pattern, s, re.IGNORECASE):
+                timeframe = tf
+                s = re.sub(pattern, " ", s, flags=re.IGNORECASE)
+                break
+
+    # Prefer whatever follows "in / at / near / en / bei …" — that's the place.
+    place = re.search(r"\b(?:in|at|near|around|en|bei)\s+(.+)$", s.strip(), re.IGNORECASE)
+    city = place.group(1) if place else s
+    city = _WEATHER_FILLER.sub(" ", city)
+    city = re.sub(r"\bthe\b", " ", city)  # lowercase only, so "The Hague" survives
+    city = re.sub(r"[?!.]", " ", city)
+    city = re.sub(r"\s+", " ", city).strip(" ,")
+    return city, timeframe
+
+
 def geocode(city: str) -> tuple[float, float, str]:
     """
     Convert a city name to (lat, lon, resolved_name).
@@ -92,8 +149,8 @@ def geocode(city: str) -> tuple[float, float, str]:
                 or hint in r.get("country_code", "").lower()
                 or hint in r.get("admin1", "").lower()
             ]
-            if not results:
-                results = all_results  # fallback: take best match ignoring hint
+            # No fallback to the first word alone: for input like "the next 3 days" that
+            # would geocode "the" → Teresina, Brazil. Better to report "not found".
 
         if not results:
             raise ValueError(f"City '{city}' not found")
@@ -330,8 +387,8 @@ def format_weather_context(weather_data: dict | list, timeframe: str) -> str:
     Convert weather data into a concise text context for the LLM.
     """
     if isinstance(weather_data, list):
-        # Weekly forecast
-        lines = [f"7-day forecast for {weather_data[0]['location']}:"]
+        # Multi-day forecast
+        lines = [f"{len(weather_data)}-day forecast for {weather_data[0]['location']}:"]
         for day in weather_data:
             precip_note = ""
             if day['precip_probability'] >= 40:

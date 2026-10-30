@@ -4,8 +4,9 @@ from dotenv import load_dotenv
 from pathlib import Path
 from pydantic import BaseModel, ConfigDict, field_validator, ValidationError
 
-# Path to .env file — one level up from core/
 ENV_PATH = Path(__file__).parent.parent / ".env"
+
+_VALID_MODELS = {"qwen3:8b", "qwen2.5:7b", "gemma3:4b"}
 
 
 # ==========================
@@ -17,8 +18,6 @@ class ChatetteSettings(BaseModel):
 
     server_url: str
     model_selection: str
-    use_groq: bool
-    groq_model: str
     email_days_window: int
     calendar_days_ahead: int
     calendar_days_behind: int
@@ -31,11 +30,11 @@ class ChatetteSettings(BaseModel):
             raise ValueError("Day window values must be non-negative")
         return v
 
-    @field_validator("model_selection", "groq_model")
+    @field_validator("model_selection")
     @classmethod
-    def must_not_be_empty(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("Model name must not be empty")
+    def must_be_valid_model(cls, v: str) -> str:
+        if v.strip() not in _VALID_MODELS:
+            raise ValueError(f"model_selection must be one of {_VALID_MODELS}")
         return v.strip()
 
 
@@ -44,21 +43,16 @@ class ChatetteSettings(BaseModel):
 # ==========================
 
 def read_settings() -> ChatetteSettings:
-    """Read current settings from .env and return a validated ChatetteSettings."""
     load_dotenv(ENV_PATH, override=True)
-    use_groq = os.getenv("USE_GROQ", "false").lower() == "true"
-    groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-
-    model_selection = groq_model if use_groq else "local"
-
+    model_selection = os.getenv("OLLAMA_MODEL", "qwen3:8b")
+    if model_selection not in _VALID_MODELS:
+        model_selection = "qwen3:8b"
     thinking_enabled = os.getenv("THINKING_ENABLED", "false").lower() == "true"
 
     try:
         return ChatetteSettings(
             server_url=f"http://{_get_local_ip()}:8000",
             model_selection=model_selection,
-            use_groq=use_groq,
-            groq_model=groq_model,
             email_days_window=int(os.getenv("EMAIL_DAYS_WINDOW", "14")),
             calendar_days_ahead=int(os.getenv("CALENDAR_DAYS_AHEAD", "14")),
             calendar_days_behind=int(os.getenv("CALENDAR_DAYS_BEHIND", "1")),
@@ -70,7 +64,6 @@ def read_settings() -> ChatetteSettings:
 
 
 def write_settings(settings: ChatetteSettings) -> bool:
-    """Write a validated ChatetteSettings to .env file."""
     try:
         if not ENV_PATH.exists():
             print(f"❌ .env file not found at {ENV_PATH}")
@@ -79,12 +72,8 @@ def write_settings(settings: ChatetteSettings) -> bool:
         with open(ENV_PATH, "r", encoding="utf-8") as f:
             content = f.read()
 
-        if settings.model_selection == "local":
-            content = _set_env_value(content, "USE_GROQ", "false")
-        else:
-            content = _set_env_value(content, "USE_GROQ", "true")
-            content = _set_env_value(content, "GROQ_MODEL", settings.model_selection)
-
+        content = _set_env_value(content, "OLLAMA_MODEL", settings.model_selection)
+        content = _set_env_value(content, "USE_GROQ", "false")
         content = _set_env_value(
             content, "THINKING_ENABLED", "true" if settings.thinking_enabled else "false"
         )
@@ -110,7 +99,6 @@ def write_settings(settings: ChatetteSettings) -> bool:
 
 
 def _set_env_value(content: str, key: str, value: str) -> str:
-    """Replace or append a key=value in .env content."""
     pattern = rf"^{re.escape(key)}=.*$"
     replacement = f"{key}={value}"
     if re.search(pattern, content, flags=re.MULTILINE):
@@ -120,7 +108,6 @@ def _set_env_value(content: str, key: str, value: str) -> str:
 
 
 def _get_local_ip() -> str:
-    """Get the local IP address of the PC."""
     import socket
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

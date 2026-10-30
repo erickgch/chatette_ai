@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import requests
 import threading
 from contextvars import ContextVar
 from pathlib import Path
@@ -13,6 +14,7 @@ import bulb_controller
 from chatette_tv import cast_manager as _cast_manager, channel_registry as _channel_registry, youtube_search as _yt_search
 from note_manager import (
     create_reminder, delete_reminder_by_line, get_all_reminders,
+    get_reminders_list, delete_all_reminders,
     save_personal_note, save_draft,
     create_list, add_item_to_list, find_list_by_name,
     get_all_lists, delete_list, get_list_items, delete_list_item
@@ -79,35 +81,55 @@ else:
 
 def reload_llm():
     """Hot-reload the LLM and calendar constants from .env (called after settings save)."""
-    global llm, USE_GROQ, GROQ_MODEL, OLLAMA_MODEL, THINKING_ENABLED, CALENDAR_DAYS_AHEAD, CALENDAR_DAYS_BEHIND
+    global llm, OLLAMA_MODEL, THINKING_ENABLED, CALENDAR_DAYS_AHEAD, CALENDAR_DAYS_BEHIND
     load_dotenv(override=True)
-    USE_GROQ = os.getenv("USE_GROQ", "false").lower() == "true"
-    GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-    OLLAMA_MODEL = os.getenv("OLLAMA_MODEL")
+    OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
     THINKING_ENABLED = os.getenv("THINKING_ENABLED", "false").lower() == "true"
     CALENDAR_DAYS_AHEAD = int(os.getenv("CALENDAR_DAYS_AHEAD", "14"))
     CALENDAR_DAYS_BEHIND = int(os.getenv("CALENDAR_DAYS_BEHIND", "1"))
-    if USE_GROQ:
-        from langchain_groq import ChatGroq
-        llm = ChatGroq(api_key=os.getenv("GROQ_API_KEY"), model=GROQ_MODEL)
-        print(f"LLM reloaded: {GROQ_MODEL} via Groq ☁️")
-    else:
-        llm = OllamaLLM(base_url=OLLAMA_BASE_URL, model=OLLAMA_MODEL)
-        print(f"LLM reloaded: {OLLAMA_MODEL} via Ollama 🖥️")
+    llm = OllamaLLM(base_url=OLLAMA_BASE_URL, model=OLLAMA_MODEL)
+    print(f"LLM reloaded: {OLLAMA_MODEL} via Ollama 🖥️")
+
+
+# Model families that can "think" (reason before answering). Only these get Ollama's
+# `think` flag — Ollama rejects it for models without thinking support (e.g. qwen2.5).
+_THINKING_MODELS = ("qwen3", "deepseek-r1", "gpt-oss", "magistral")
+_OLLAMA_TIMEOUT = 300   # seconds — long drafts on a cold model can take a while
+
+
+def _ollama_generate(prompt: str) -> str:
+    """Call Ollama's /api/generate directly.
+
+    Why not OllamaLLM: Qwen3 thinks before every answer unless Ollama's `think` flag is
+    false. The old "/no_think" prompt suffix is ignored by current Ollama versions, and
+    langchain-ollama 0.2.0 can't pass the flag — so every call silently generated ~150
+    hidden reasoning tokens (~3 s) that were stripped from the answer afterwards.
+    """
+    body = {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False}
+    if any(name in OLLAMA_MODEL.lower() for name in _THINKING_MODELS):
+        body["think"] = THINKING_ENABLED
+    url = f"{OLLAMA_BASE_URL.rstrip('/')}/api/generate"
+    resp = requests.post(url, json=body, timeout=_OLLAMA_TIMEOUT)
+    if resp.status_code == 400 and "think" in body and "think" in resp.text.lower():
+        # This model doesn't support the flag after all — retry without it
+        body.pop("think")
+        resp = requests.post(url, json=body, timeout=_OLLAMA_TIMEOUT)
+    resp.raise_for_status()
+    return resp.json().get("response", "")
 
 
 def llm_invoke(prompt: str) -> str:
     """Invoke LLM and always return a plain string."""
     try:
-        _is_qwen = (USE_GROQ and "qwen" in GROQ_MODEL.lower()) or \
-                   (not USE_GROQ and "qwen3" in OLLAMA_MODEL.lower())
+        _is_qwen = "qwen3" in OLLAMA_MODEL.lower()
 
-        _prompt = prompt + " /no_think" if (_is_qwen and not THINKING_ENABLED) else prompt
+        if USE_GROQ:
+            response = llm.invoke(prompt)
+            text = response.content if hasattr(response, 'content') else str(response)
+        else:
+            text = _ollama_generate(prompt)
 
-        response = llm.invoke(_prompt)
-        text = response.content if hasattr(response, 'content') else str(response)
-
-        # Strip any <think>...</think> blocks (fallback in case /no_think is ignored)
+        # Strip any <think>...</think> blocks (thinking mode, or models that inline it)
         text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
 
         # Strip markdown bold/italic added by Qwen
@@ -214,8 +236,8 @@ CHATETTE_PERSONA = """You are Chatette — a small robotic cat and personal assi
 About {user_name}: {user_profile}
 
 Your personality:
-- Warm, friendly and competent — like a smart friend who always has things under control. 
-- Keep answers concise and straight to the point, while maintaining a friendly tone.
+- Warm, friendly and competent.
+- Keep answers concise and straight to the point, but stay friendly.
 - You have your own voice. Not a generic AI bot. Not a corporate assistant.
 - Diligent, accurate, but friendly. You answer first, add warmth second.
 - Never over-explain or pad responses with unnecessary pleasantries.
@@ -227,12 +249,14 @@ STRICT RULES:
 - Only answer what was specifically asked. Nothing more. Do not make additional comments.
 - Keep answers to 1-2 sentences maximum.
 - Always respond in the same language of the QUESTION, not the context.
-- If the question refers to a previous exchange, use it to answer correctly.
-- Never invent personal information not in the profile.
+- If the question refers to a previous exchange, use it to answer correctly. But your notes and the context are the source of truth: if your previous answer contradicts them, trust the notes and correct yourself.
+- When the question is about {user_name} personally (family, relationships, health, history, preferences, plans), look for the answer in the personal notes in the context as well — not only in the profile.
+- Never invent personal information that is not in the profile or the personal notes.
 - Never refer to {user_name} in third person — use 'you' and 'your'.
 - When corrected on a factual error, say so briefly and drop it. Never propose an alternative wrong answer as a recovery.
 - Never claim to control hardware or services not explicitly listed in your tools. You can control smart bulbs. That is all.
-- Do not use calendar, reminders, or notes context unless the question is directly about {user_name}'s schedule, tasks, or plans.
+- Use only the parts of the context that answer the question. Never mention unrelated calendar events, reminders, emails or notes.
+- For any date, weekday or "how long until/ago", copy the numbers from the "Date facts" — never calculate them yourself.
 - When asked about yourself (your plans, feelings, preferences), answer honestly as a software assistant. You do not have a physical life, personal plans, or a schedule of your own."""
 
 
@@ -241,19 +265,32 @@ prompt_template = PromptTemplate(
     template=CHATETTE_PERSONA + CHATETTE_RULES + """
 
 If you don't find the answer in the context, say so briefly.
+Use ONLY context that directly answers the question asked. Ignore everything else in the context.
 
 Examples:
 Context: Today is Monday, March 16, 2026. Calendar event: Dentist on Wednesday, March 18 at 10am.
-{user_name}: Do I have anything this week?
-Chatette: Heads up — dentist on Wednesday at 10am. You're all set for the rest of the week.
+{user_name}: What day is today?
+Chatette: Today is Monday, March 16, 2026.
 
-Context: User enjoys technology and building AI assistants.
-{user_name}: Can you recommend a podcast?
-Chatette: Given your interest in tech and AI — Lex Fridman or TWIML AI Podcast are worth your time.
+Context: Today is Tuesday, September 15, 2026. Calendar: dentist at 10am, movies with Ines at 8pm.
+{user_name}: Do I have anything today?
+Chatette: Yes — dentist at 10am and movies with Ines at 8pm.
 
-Context: Previous exchange: User asked about capital of Mexico. Chatette said Mexico City.
-{user_name}: since when?
-Chatette: Mexico City has been the capital since 1521, founded on the ruins of Tenochtitlan after the Spanish conquest.
+Context: Note: I was on vacation in Brittany and Normandy in France in August 2026. Visited Fecamp, Etretat, Saint Malo and Perros-Guirec.
+{user_name}: Have I been to France, and if so, where?
+Chatette: Yes — Brittany and Normandy in summer 2026. You visited Fecamp, Etretat, Saint Malo and Perros-Guirec.
+
+Context: Note: I am preparing for the Kölner Marathon on October 4th. I will run the relay, covering 11.5 km. Training: 06.09: 6.7 km, 08.09: 5 km, 14.09: 8.2 km.
+{user_name}: How is my marathon training going?
+Chatette: You're running the Kölner Marathon relay on October 4th — 11.5 km. Your last three runs: 6.7 km, 5 km, and 8.2 km.
+
+Context: Note: I am allergic to birches and alders.
+{user_name}: Do I have any allergies?
+Chatette: Yes — birches and alders.
+
+Context: (no relevant information found)
+{user_name}: What's my blood type?
+Chatette: I don't have that in my notes.
 
 Context:
 {context}
@@ -265,6 +302,8 @@ Answer:""",
 )
 
 _current_device: ContextVar[str] = ContextVar("device_id", default="app")
+_current_voice: ContextVar[bool] = ContextVar("voice", default=False)
+_current_question: ContextVar[str] = ContextVar("question", default="")
 
 _pending_state: dict[str, "PendingState"] = {}
 _conversation_contexts: dict[str, dict] = {}
@@ -476,8 +515,8 @@ Valid intents:
 - remove_from_list: user wants to remove an item from a list (e.g. "remove milk from the list")
 - delete_list: user wants to delete an entire list (e.g. "delete my shopping list")
 - view_reminders: user wants to see their saved reminders or to-do items (e.g. "show my reminders", "what do I have to do?", "what did I write down?")
-- view_events: user wants to see their calendar events or appointments (e.g. "do I have anything this week?", "what's on my calendar?", "any appointments coming up?", "what are my plans for tomorrow?")
-- view_agenda: user wants a combined overview of reminders AND events — a quick picture of what is coming up (e.g. "what do I have going on?", "give me my agenda", "what's coming up this week?", "anything important soon?")
+- view_events: user wants to see their calendar events or appointments (e.g. "do I have anything this week?", "what's on my calendar?", "any appointments coming up?", "what are my plans for tomorrow?"). Do NOT use for questions about past activities, training history, or personal habits — those are general.
+- view_agenda: user wants a combined overview of reminders AND events — a quick picture of what is coming up (e.g. "what do I have going on?", "give me my agenda", "what's coming up this week?", "anything important soon?"). Do NOT use for personal fact questions like "am I married?", "what's my height?", "where was I born?" — those are general.
 - view_emails: user wants to see recent emails (e.g. "any new emails?", "check my inbox", "what emails did I get?", "did I get any emails?")
 - get_weather: user wants weather info (e.g. "what's the weather?", "will it rain today?", "forecast for Berlin")
 - find_places: user wants to find nearby places, venues or businesses (e.g. "good Chinese restaurant nearby", "find me a pharmacy", "any sushi places close by?", "recommend a cafe near me")
@@ -489,7 +528,9 @@ Valid intents:
 - cast_tv_power: user wants to turn the TV on or off ("turn on the TV", "turn off the TV", "switch the TV off")
 - cast_volume: user wants to change TV volume ("volume up", "volume down", "set volume to 40", "louder", "quieter", "mute")
 - cast_stop: user wants to stop TV playback ("stop the TV", "pause the TV", "stop casting")
-- general: anything else — general questions, conversation, advice
+- general: anything else — general questions, conversation, advice, or personal fact questions about the user (e.g. "am I married?", "where was I born?", "what's my height?", "do I have allergies?", "have I been to France?")
+
+IMPORTANT: Only choose an action intent (create_reminder, create_event, save_personal_note, create_list, ...) when the user explicitly asks you to DO that action ("remind me", "add", "schedule", "save", "write down", "put in my calendar"). Merely mentioning a future event, appointment or plan is NOT a request to save it. If the user shares something and asks a question, wants advice, tips, ideas or an opinion, choose general.
 
 For the extracted field, include only what is relevant.
 IMPORTANT: If the user mentions multiple items of the same type, extract ALL of them as an array.
@@ -504,7 +545,7 @@ IMPORTANT: If the user mentions multiple items of the same type, extract ALL of 
 - add_to_list: {{"items": ["item1", "item2", ...], "list_name": "target list"}} — ALWAYS use items array
 - remove_from_list: {{"item": "item name", "list_name": "target list"}}
 - delete_list: {{"list_name": "list to delete"}}
-- get_weather: {{"city": "city name or empty for home", "timeframe": "now|today|tomorrow|week"}}
+- get_weather: {{"city": "city name or empty for home", "timeframe": "now|today|tomorrow|week|N days (e.g. \"3 days\")"}}
 - find_places: {{"place_type": "restaurant|cafe|bar|pharmacy|supermarket|museum|gym|...", "cuisine": "chinese|italian|japanese|... or empty"}}
 - view_emails: {{"max_results": 5}} — optional, default 5
 - control_bulbs: {{}}
@@ -531,6 +572,18 @@ User: "add milk, eggs and bread to my shopping list"
 
 User: "schedule a dentist appointment on Monday and a haircut on Wednesday"
 → {{"events": [{{"title": "Dentist appointment", "description": ""}}, {{"title": "Haircut", "description": ""}}]}}
+
+User: "have I been training for the marathon?" (previous topic was marathon date)
+→ {{"intent": "general", "confidence": "high", "extracted": {{}}}}
+
+User: "am I married?" or "where was I born?" or "do I have allergies?"
+→ {{"intent": "general", "confidence": "high", "extracted": {{}}}}
+
+User: "I'm having surgery in two days. Do you have any tips?" or "my flight is on Monday, what should I pack?"
+→ {{"intent": "general", "confidence": "high", "extracted": {{}}}}  (asking for advice — nothing to save)
+
+User: "I have a dentist appointment on Friday, put it in my calendar"
+→ {{"intent": "create_event", "confidence": "high", "extracted": {{"events": [{{"title": "Dentist appointment", "description": ""}}]}}}}
 
 Reply with ONLY a valid JSON object, nothing else:
 {{
@@ -563,26 +616,41 @@ Reply with ONLY a valid JSON object, nothing else:
 # CONVERSATION CONTEXT HELPER
 # ===================================
 
+def _normalize_question(text: str | None) -> str:
+    return " ".join(re.sub(r"[^\w\s]", "", (text or "").lower()).split())
+
+
 def _build_conversation_context() -> str:
-    """Build previous exchange string if available."""
-    if _ctx()["last_answer"]:
-        last_answer = _ctx()["last_answer"][:200]
-        last_question = _ctx()["last_question"][:100]
-        return (
-            f"Previous exchange:\n"
-            f"User: {last_question}\n"
-            f"Chatette: {last_answer}\n\n"
-        )
-    return ""
+    """Build previous exchange string if available.
+
+    A wrong earlier answer must not outvote the user's notes: the small model tends to
+    repeat whatever it said before (e.g. "no siblings" even with "brother Isaac" in the
+    context). So the exchange is labelled as possibly wrong, and when the user repeats
+    the same question — usually a sign the answer was wrong — it is left out entirely.
+    """
+    if not _ctx()["last_answer"]:
+        return ""
+    if _normalize_question(_current_question.get()) == _normalize_question(_ctx()["last_question"]):
+        print("↪️ Same question asked again — previous answer left out of the prompt")
+        return ""
+    last_answer = _ctx()["last_answer"][:200]
+    last_question = _ctx()["last_question"][:100]
+    return (
+        f"Previous exchange (only for follow-up questions; it may contain mistakes — "
+        f"if it contradicts the notes or context below, trust the notes and context):\n"
+        f"User: {last_question}\n"
+        f"Chatette: {last_answer}\n\n"
+    )
 
 
 def _persona_prompt(lang: str = "en") -> str:
-    """Return the base persona prompt with user info filled in."""
+    """Return the base persona prompt with user info filled in (+ computed date facts
+    for dates in the profile, e.g. days until the next birthday)."""
     return CHATETTE_PERSONA.format(
         user_name=USER_NAME,
         user_profile=USER_PROFILE,
         lang_name=_LANG_NAMES.get(lang, "English")
-    )
+    ) + _date_facts(USER_PROFILE or "")
 
 
 # ===================================
@@ -765,8 +833,8 @@ Reply with one of:
 
 def handle_delete(question: str, extracted: dict, lang: str = "en") -> str:
     """Find matching reminder and ask confirmation."""
-    all_reminders = get_all_reminders()
-    if all_reminders == "No reminders found.":
+    items = get_reminders_list()
+    if not items:
         return _t(
             "Nothing on your reminder list.",
             "Keine Erinnerungen vorhanden.",
@@ -774,26 +842,65 @@ def handle_delete(question: str, extracted: dict, lang: str = "en") -> str:
             lang
         )
 
-    previous_context = _build_conversation_context()
-    hint = extracted.get("text", "")
+    # "delete all reminders" / "alle Erinnerungen löschen" / "borra todos los recordatorios"
+    if re.search(r"\b(all|every|everything|alle|todos|todas)\b", question.lower()):
+        _pending().text = None
+        _pending().action = "delete_all"
+        _pending().conflict = None
+        _pending().line_to_delete = None
+        _pending().lang = lang
+        return _t(
+            f"Delete all {len(items)} reminder{'s' if len(items) != 1 else ''}?",
+            f"Alle {len(items)} Erinnerungen löschen?",
+            f"¿Eliminar los {len(items)} recordatorios?",
+            lang
+        )
 
-    match_prompt = f"""Find the reminder to delete.
+    hint = (extracted.get("text") or "").strip().lower()
+
+    # 1. Deterministic match on the classifier hint (substring, then fuzzy)
+    matched = None
+    if hint:
+        subs = [i for i in items if hint in i.text.lower() or i.text.lower() in hint]
+        if len(subs) == 1:
+            matched = subs[0]
+        else:
+            import difflib
+            scored = sorted(
+                ((difflib.SequenceMatcher(None, hint, i.text.lower()).ratio(), i) for i in items),
+                key=lambda s: s[0], reverse=True
+            )
+            if scored[0][0] >= 0.6:
+                matched = scored[0][1]
+
+    # 2. Fall back to the LLM — ask for a number, not free text
+    if matched is None:
+        previous_context = _build_conversation_context()
+        numbered = "\n".join(
+            f"{n}. {i.text}" + (f" (due: {i.due})" if i.due else "")
+            for n, i in enumerate(items, 1)
+        )
+        match_prompt = f"""Find the reminder the user wants to delete.
 {previous_context}
-The user wants to delete: "{question}"
+The user said: "{question}"
 Hint from classifier: "{hint}"
 
 Reminders:
-{all_reminders}
+{numbered}
 
 - Find the best match, even if wording differs
 - If the user says "that" or "it", use the previous exchange
-- Return ONLY the exact line including the timestamp
-- If nothing matches, return NO_MATCH"""
+- Return ONLY the number of the matching reminder
+- If nothing matches, return 0"""
 
-    matched_line = llm_invoke(match_prompt).strip().strip('"').strip("'")
-    print(f"LLM matched: '{matched_line}'")
+        answer = llm_invoke(match_prompt).strip()
+        print(f"LLM matched: '{answer}'")
+        m = re.search(r"\d+", answer)
+        idx = int(m.group()) if m else 0
+        if 1 <= idx <= len(items):
+            matched = items[idx - 1]
 
-    if "NO_MATCH" in matched_line or not matched_line:
+    if matched is None:
         return _t(
             "Nothing matching that in your reminders. Can you be more specific?",
             "Keine passende Erinnerung gefunden. Kannst du genauer sein?",
@@ -801,6 +908,7 @@ Reminders:
             lang
         )
 
+    matched_line = matched.text
     _pending().text = None
     _pending().action = "delete"
     _pending().conflict = None
@@ -957,61 +1065,315 @@ Output (JSON array only):"""
     )
 
 
-def handle_draft(question: str, extracted: dict, lang: str = "en") -> str:
-    """Generate a draft document."""
+# ===================================
+# DRAFTS — guided flow
+# ===================================
+# A chat draft is a short conversation; its state lives in _pending():
+#   draft_offer   → Chatette restated the request and asked whether she may ask
+#                   a few questions / add suggestions, or just write it.
+#   draft_clarify → she asked clarifying questions and waits for the answers.
+#   draft         → she showed a draft and waits for save / discard / changes.
+# Quick requests, the Draft shortcut (/command) and voice go straight to "draft".
+# event_data holds the request, so every step writes from the user's own words.
+
+DRAFT_STAGES = ("draft_offer", "draft_clarify", "draft")
+
+_QUOTED_FILENAME_RE = re.compile(r"""["'“‘]([^"'“”‘’\n]+?\.(?:txt|md|docx?|rtf))["'”’]""", re.IGNORECASE)
+_BARE_FILENAME_RE = re.compile(r"\b([\w\-.]+\.(?:txt|md|docx?|rtf))\b", re.IGNORECASE)
+
+# Explicit "don't ask me anything" wording — the only thing that skips the questions step.
+_QUICK_DRAFT_RE = re.compile(
+    r"\b(quick(ly)?|just (write|draft|give)|no questions|without (any )?questions|straight away|right away|"
+    r"kurz(e|en|er)?|schnell|einfach (nur )?schreiben|ohne (rück)?fragen|"
+    r"rápid[oa]|rapid[oa]|sin preguntas|directamente)\b",
+    re.IGNORECASE)
+
+_DRAFT_CANCEL = {"cancel", "stop", "never mind", "nevermind", "forget it", "abbrechen", "vergiss es",
+                 "cancelar", "olvídalo", "olvidalo"}
+_DRAFT_YES = {"yes", "yep", "yeah", "sure", "ok", "okay", "please", "go ahead", "ja", "klar", "gerne",
+              "sí", "si", "claro", "vale", "dale"}
+_DRAFT_NO = {"no", "nope", "nein", "no thanks", "nein danke", "no gracias"}
+
+
+def _parse_json(text: str, opener: str = "{", closer: str = "}"):
+    start, end = text.find(opener), text.rfind(closer)
+    if start == -1 or end <= start:
+        return None
+    try:
+        return json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        return None
+
+
+def _requested_filename(text: str) -> str | None:
+    """Filename the user asked for, e.g. "name it 'christmas-party-idea.txt'"."""
+    m = _QUOTED_FILENAME_RE.search(text) or _BARE_FILENAME_RE.search(text)
+    return m.group(1).strip() if m else None
+
+
+def _short_reply(text: str) -> str:
+    """Lower-cased reply without punctuation, for matching one-word answers."""
+    return re.sub(r"[^\w\s]", "", text.lower()).strip()
+
+
+def _draft_state() -> dict:
+    data = _pending().event_data
+    return data if isinstance(data, dict) else {}
+
+
+def _set_draft_stage(stage: str, state: dict, lang: str, content: str | None = None) -> None:
+    _pending().action = stage
+    _pending().text = content
+    _pending().items = None
+    _pending().conflict = None
+    _pending().line_to_delete = state.get("title")
+    _pending().event_data = state
+    _pending().lang = lang
+
+
+def _analyze_draft_request(request: str, previous_context: str, lang: str) -> dict:
     current_date = datetime.now().strftime("%A, %B %d, %Y")
-    previous_context = _build_conversation_context()
-
-    draft_type = extracted.get("type", "")
-    draft_purpose = extracted.get("purpose", "")
-
-    if not draft_type or not draft_purpose:
-        extraction_prompt = f"""Today is {current_date}.
+    prompt = f"""Today is {current_date}.
 {previous_context}
-The user said: "{question}"
+The user asked their personal assistant for a draft:
+\"\"\"{request}\"\"\"
 
-Extract the draft type and purpose.
-Return ONLY a JSON object:
-- type: document type (e.g. "email", "letter", "message")
-- purpose: what it's about
+Analyse the request. Return ONLY a JSON object with:
+- "type": the kind of document (e.g. "email", "letter", "message", "plan", "document")
+- "title": a short title for it, at most 6 words
+- "summary": 1-2 sentences in {_LANG_NAMES.get(lang, "English")}, speaking to the user as "you", restating what they want with every concrete detail and constraint they gave (who, where, when, numbers, restrictions, tone). Do not add anything they did not say.
 
 Output:"""
-        response = llm_invoke(extraction_prompt).strip()
-        response = response[response.find("{"):response.rfind("}")+1]
-        try:
-            draft_info = json.loads(response)
-            draft_type = draft_info.get("type", "document")
-            draft_purpose = draft_info.get("purpose", question)
-        except json.JSONDecodeError:
-            draft_type = "document"
-            draft_purpose = question
+    info = _parse_json(llm_invoke(prompt)) or {}
+    return {
+        "type": str(info.get("type") or "document"),
+        "title": str(info.get("title") or "draft"),
+        "summary": str(info.get("summary") or "").strip(),
+        "quick": bool(_QUICK_DRAFT_RE.search(request)),
+    }
 
-    lang_name = {"en": "English", "de": "German", "es": "Spanish"}.get(lang, "English")
-    draft_prompt = f"""Today is {current_date}.
-{previous_context}
-Write a {draft_type} {draft_purpose} for {USER_NAME}.
-- Write entirely in {lang_name}
-- Professional and well-structured
-- Use [placeholder] for unknown details
-- Concise
 
-Write the {draft_type}:"""
+def _write_draft(state: dict, lang: str) -> str:
+    """Write the draft from the user's request (+ clarifying Q&A if any)."""
+    current_date = datetime.now().strftime("%A, %B %d, %Y")
+    lang_name = _LANG_NAMES.get(lang, "English")
+    qa = ""
+    if state.get("questions"):
+        qa = ("\nYou asked the user:\n" + "\n".join(f"- {q}" for q in state["questions"]) +
+              f"\nThe user answered:\n\"\"\"{state.get('answers', '')}\"\"\"\n")
+    if state.get("suggestions"):
+        fill = ("- Where details are still open, fill them with concrete, creative suggestions of your own "
+                "that fit every constraint above.")
+    else:
+        fill = ("- Do not add ideas the user did not ask for. Use [placeholder] only for details that are "
+                "genuinely needed and missing.")
+    prompt = f"""Today is {current_date}.
+{state.get("context", "")}
+You are drafting a {state.get("type", "document")} on behalf of {USER_NAME}, the user. {USER_NAME} is the author/sender — never the recipient. When a sign-off is needed, sign as {USER_NAME}; address recipients the way the user described them.
 
-    draft_content = llm_invoke(draft_prompt).strip()
-    title = f"{draft_type}_{draft_purpose.replace(' ', '_')[:30]}"
+The user's request:
+\"\"\"{state["request"]}\"\"\"
+{qa}
+Rules:
+- Follow every detail and constraint in the request{" and the answers" if qa else ""} exactly, and never contradict them (if they rule something out, leave it out; if the space or budget is small, keep every suggestion realistic for it).
+- Parts of the request that are instructions to you (e.g. "quick", "no questions", "name the file …", "imagine you are …") are not content — never repeat them in the document.
+- Do not invent facts about the user's situation (who it is for, company, budget, venue, date) that they did not give. Today's date is only for reference — do not use it as the date of the event or document unless the user said so.
+{fill}
+- Write entirely in {lang_name}, well structured and to the point.
+- Output only the document itself — no introduction, closing remarks or file name.
 
-    _pending().text = draft_content
-    _pending().action = "draft"
-    _pending().conflict = None
-    _pending().line_to_delete = title
-    _pending().event_data = {"type": draft_type, "purpose": draft_purpose}
-    _pending().lang = lang
-    return f"Here's a draft {draft_type} {draft_purpose}:\n\n{draft_content}\n\n" + _t(
-        "Want me to save this?",
-        "Soll ich das speichern?",
-        "¿Quieres que lo guarde?",
-        lang
-    )
+The {state.get("type", "document")}:"""
+    return llm_invoke(prompt).strip()
+
+
+def _draft_questions(state: dict, lang: str) -> list[str]:
+    prompt = f"""The user asked their personal assistant for a draft:
+\"\"\"{state["request"]}\"\"\"
+
+Before writing it, list the 3 to 6 questions whose answers would make this {state.get("type", "document")} noticeably better.
+- Only ask about things the user has NOT already said.
+- Keep each question short and specific.
+- Write them in {_LANG_NAMES.get(lang, "English")}.
+Return ONLY a JSON array of strings.
+
+Output:"""
+    raw = llm_invoke(prompt)
+    questions = _parse_json(raw, "[", "]")
+    if not isinstance(questions, list) or not questions:
+        # Fallback: one question per non-empty line, numbering stripped
+        questions = [re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", l).strip() for l in raw.splitlines()]
+    return [str(q).strip() for q in questions if str(q).strip()][:6]
+
+
+def _classify_draft_reply(stage: str, reply: str) -> str:
+    """Interpret the user's reply to the offer ("quick"/"suggest"/"cancel")
+    or to the save question ("save"/"discard"/"revise")."""
+    short = _short_reply(reply)
+    if short in _DRAFT_CANCEL:
+        return "cancel" if stage == "draft_offer" else "discard"
+    if short in _DRAFT_YES:
+        return "suggest" if stage == "draft_offer" else "save"
+    if short in _DRAFT_NO:
+        return "quick" if stage == "draft_offer" else "discard"
+
+    if stage == "draft_offer":
+        asked = "whether she may ask a few questions and add her own suggestions before writing the draft, or just write it now"
+        options = ('"suggest" — the user agrees to questions/suggestions (or adds more details)\n'
+                   '"quick" — the user declines and just wants the draft now\n'
+                   '"cancel" — the user no longer wants the draft at all')
+        fallback = "suggest"
+    else:
+        asked = "whether to save the draft she just showed"
+        options = ('"save" — the user wants it saved as it is\n'
+                   '"discard" — the user does not want it saved\n'
+                   '"revise" — the user asks for changes to the draft')
+        fallback = "revise"
+    prompt = f"""The assistant asked the user {asked}.
+The user replied: "{reply}"
+
+Which one is it?
+{options}
+Return ONLY a JSON object like {{"decision": "..."}}.
+
+Output:"""
+    decision = (_parse_json(llm_invoke(prompt)) or {}).get("decision", "")
+    valid = ("suggest", "quick", "cancel") if stage == "draft_offer" else ("save", "discard", "revise")
+    return decision if decision in valid else fallback
+
+
+def _present_draft(state: dict, content: str, lang: str, updated: bool = False) -> str:
+    _set_draft_stage("draft", state, lang, content)
+    if updated:
+        intro = _t("Here's the updated version:", "Hier ist die überarbeitete Version:", "Aquí está la versión actualizada:", lang)
+    else:
+        intro = _t("Got it — here's the draft:", "Alles klar — hier ist der Entwurf:", "Entendido — aquí está el borrador:", lang)
+    name = state.get("filename")
+    if name:
+        ask_save = _t(
+            f"Want me to save it as '{name}'? You can also tell me what to change.",
+            f"Soll ich es als '{name}' speichern? Du kannst mir auch sagen, was ich ändern soll.",
+            f"¿Lo guardo como '{name}'? También puedes decirme qué cambiar.",
+            lang)
+    else:
+        ask_save = _t(
+            "Want me to write this down? You can also tell me what to change.",
+            "Soll ich das speichern? Du kannst mir auch sagen, was ich ändern soll.",
+            "¿Quieres que lo guarde? También puedes decirme qué cambiar.",
+            lang)
+    return f"{intro}\n\n{content}\n\n{ask_save}"
+
+
+def handle_draft(question: str, extracted: dict, lang: str = "en", guided: bool = False) -> str:
+    """Start a draft. guided=True (typed chat) runs the offer → questions → draft flow;
+    otherwise (quick request, Draft shortcut, voice) the draft is written right away."""
+    request = question.strip() or extracted.get("purpose", "")
+    previous_context = _build_conversation_context()
+    info = _analyze_draft_request(request, previous_context, lang)
+    state = {
+        "request": request,
+        "context": previous_context,
+        "type": info["type"],
+        "title": info["title"],
+        "filename": _requested_filename(request),
+        "questions": [],
+        "answers": "",
+        "suggestions": False,
+    }
+    if state["filename"]:
+        state["filename"] = os.path.splitext(state["filename"])[0] + ".txt"
+
+    if not guided or info["quick"] or not info["summary"]:
+        return _present_draft(state, _write_draft(state, lang), lang)
+
+    _set_draft_stage("draft_offer", state, lang)
+    return info["summary"] + "\n\n" + _t(
+        "Before I write it — may I ask a few questions and add some suggestions of my own? "
+        "Or should I just write it with what you've given me?",
+        "Bevor ich loslege — darf ich ein paar Fragen stellen und eigene Vorschläge einbringen? "
+        "Oder soll ich es einfach mit deinen Angaben schreiben?",
+        "Antes de escribirlo — ¿puedo hacerte algunas preguntas y añadir sugerencias propias? "
+        "¿O lo escribo directamente con lo que me has dado?",
+        lang)
+
+
+def handle_draft_followup(reply: str, lang: str = "en") -> str:
+    """Continue a draft conversation started by handle_draft()."""
+    stage = _pending().action
+    state = _draft_state()
+    lang = _pending().lang or lang
+    if not state.get("request"):
+        _pending().clear()
+        return _t("I lost track of that draft — could you ask again?",
+                  "Ich habe den Entwurf verloren — kannst du nochmal fragen?",
+                  "Perdí el borrador — ¿puedes pedírmelo de nuevo?", lang)
+
+    dropped = _t("No problem — I've dropped the draft.",
+                 "Kein Problem — ich verwerfe den Entwurf.",
+                 "Sin problema — descarto el borrador.", lang)
+
+    if stage == "draft_offer":
+        decision = _classify_draft_reply(stage, reply)
+        if decision == "cancel":
+            _pending().clear()
+            return dropped
+        if decision == "quick":
+            return _present_draft(state, _write_draft(state, lang), lang)
+        # Accepted — keep any extra details they added in the same breath.
+        if len(_short_reply(reply).split()) > 3:
+            state["request"] += "\n" + reply.strip()
+        state["questions"] = _draft_questions(state, lang)
+        state["suggestions"] = True
+        if not state["questions"]:
+            return _present_draft(state, _write_draft(state, lang), lang)
+        _set_draft_stage("draft_clarify", state, lang)
+        numbered = "\n".join(f"{i}. {q}" for i, q in enumerate(state["questions"], 1))
+        return _t(
+            f"Great — a few questions first:\n\n{numbered}\n\nAnswer whichever you like; I'll fill in the rest with my own suggestions.",
+            f"Super — zuerst ein paar Fragen:\n\n{numbered}\n\nBeantworte, was du möchtest; den Rest ergänze ich mit eigenen Vorschlägen.",
+            f"Genial — primero unas preguntas:\n\n{numbered}\n\nResponde lo que quieras; el resto lo completo con mis propias sugerencias.",
+            lang)
+
+    if stage == "draft_clarify":
+        if _short_reply(reply) in _DRAFT_CANCEL:
+            _pending().clear()
+            return dropped
+        state["answers"] = reply.strip()
+        return _present_draft(state, _write_draft(state, lang), lang)
+
+    # stage == "draft": save, discard or revise
+    content = _pending().text or ""
+    decision = _classify_draft_reply(stage, reply)
+    if decision == "save":
+        filename = save_draft(state.get("title") or "draft", content, filename=state.get("filename"))
+        ingest_notes()
+        _pending().clear()
+        if not filename:
+            return _t("Something went wrong saving the draft — try again?",
+                      "Beim Speichern ist etwas schiefgelaufen — nochmal versuchen?",
+                      "Algo salió mal al guardar el borrador — ¿intentamos de nuevo?", lang)
+        return _t(
+            f"Saved as '{filename}' in your drafts. You're all set.",
+            f"Als '{filename}' in deinen Entwürfen gespeichert.",
+            f"Guardado como '{filename}' en tus borradores.",
+            lang)
+    if decision == "discard":
+        _pending().clear()
+        return dropped
+
+    revise_prompt = f"""You wrote this {state.get("type", "document")} on behalf of {USER_NAME} (the author/sender, never the recipient):
+\"\"\"{content}\"\"\"
+
+Their original request was:
+\"\"\"{state["request"]}\"\"\"
+
+They now ask for these changes:
+\"\"\"{reply}\"\"\"
+
+Rewrite the whole {state.get("type", "document")} with the changes applied. Keep everything else that still fits, and keep respecting every constraint from the original request unless the changes override it.
+Write entirely in {_LANG_NAMES.get(lang, "English")}. Output only the document itself.
+
+The {state.get("type", "document")}:"""
+    return _present_draft(state, llm_invoke(revise_prompt).strip(), lang, updated=True)
 
 
 def handle_create_list(question: str, extracted: dict, lang: str = "en") -> str:
@@ -1408,6 +1770,112 @@ Respond in {_LANG_NAMES.get(lang, 'English')}."""
     return llm_invoke(format_prompt).strip()
 
 
+# ===================================
+# DATE FACTS — date maths done in code, handed to the LLM
+# ===================================
+# Small models guess badly ("your birthday on August 26th is in 8 months" — it was 10).
+# _date_facts() finds dates in profile/chunk text and states the relative offsets.
+
+_MONTHS = {
+    "january": 1, "jan": 1, "januar": 1, "enero": 1, "february": 2, "feb": 2, "februar": 2, "febrero": 2,
+    "march": 3, "mar": 3, "märz": 3, "marzo": 3, "april": 4, "apr": 4, "abril": 4,
+    "may": 5, "mai": 5, "mayo": 5, "june": 6, "jun": 6, "juni": 6, "junio": 6,
+    "july": 7, "jul": 7, "juli": 7, "julio": 7, "august": 8, "aug": 8, "agosto": 8,
+    "september": 9, "sep": 9, "sept": 9, "septiembre": 9, "october": 10, "oct": 10, "oktober": 10,
+    "okt": 10, "octubre": 10, "november": 11, "nov": 11, "noviembre": 11,
+    "december": 12, "dec": 12, "dezember": 12, "dez": 12, "diciembre": 12,
+}
+_M = "|".join(sorted(_MONTHS, key=len, reverse=True))
+_DATE_PATTERNS = [
+    re.compile(rf"\b(?P<d>\d{{1,2}})(?:st|nd|rd|th)?\.?\s+(?:of\s+|de\s+)?(?P<m>{_M})\b\.?,?\s*(?:de\s+)?(?P<y>\d{{4}})?", re.I),
+    re.compile(rf"\b(?P<m>{_M})\.?\s+(?P<d>\d{{1,2}})(?:st|nd|rd|th)?\b,?\s*(?P<y>\d{{4}})?", re.I),
+    re.compile(r"\b(?P<y>\d{4})-(?P<m>\d{2})-(?P<d>\d{2})\b"),
+    re.compile(r"\b(?P<d>\d{1,2})\.(?P<m>\d{1,2})\.(?P<y>\d{4})\b"),
+]
+_BIRTH_WORDS = re.compile(r"born|birthday|geburtstag|geboren|cumpleaños|nací|naci", re.I)
+
+
+def _rel_days(delta: int) -> str:
+    if delta == 0:
+        return "today"
+    if delta == 1:
+        return "tomorrow"
+    if delta == -1:
+        return "yesterday"
+    return f"in {delta} days" if delta > 0 else f"{-delta} days ago"
+
+
+def _date_facts(*texts: str, max_facts: int = 12) -> str:
+    """Return a prompt block of precomputed date facts for dates found in `texts`."""
+    from datetime import date as _date
+    today = _date.today()
+    facts: dict[tuple, tuple[int, str]] = {}   # (month, day, year) -> (priority, line)
+    for text in texts:
+        if not text:
+            continue
+        for pattern in _DATE_PATTERNS:
+            for m in pattern.finditer(text):
+                month = m.group("m")
+                month = int(month) if month.isdigit() else _MONTHS.get(month.lower())
+                try:
+                    day, year = int(m.group("d")), int(m.group("y")) if m.group("y") else None
+                    _date(year or 2000, month, day)       # validate (2000 is a leap year)
+                except (TypeError, ValueError):
+                    continue
+                key = (month, day, year)
+                if key in facts:
+                    continue
+                label = " ".join(m.group(0).split())
+                is_birth = bool(_BIRTH_WORDS.search(text[max(0, m.start() - 40):m.start()]))
+                if year is None and not is_birth:
+                    # No year given: a recent date most likely meant this year
+                    # ("the marathon is on the 4th of October", written in September).
+                    try:
+                        this_year = _date(today.year, month, day)
+                    except ValueError:
+                        this_year = None
+                    if this_year and -60 <= (this_year - today).days < 0:
+                        facts[key] = (3, f"- \"{label}\" = {this_year:%A, %B %d, %Y}, "
+                                         f"{_rel_days((this_year - today).days)} (already in the past).")
+                        continue
+                if is_birth or year is None:
+                    # Recurring date (birthday / date without a year): next occurrence
+                    nxt = None
+                    for y in (today.year, today.year + 1, today.year + 2):
+                        try:
+                            cand = _date(y, month, day)
+                        except ValueError:            # 29 February in a non-leap year
+                            continue
+                        if cand >= today:
+                            nxt = cand
+                            break
+                    if not nxt:
+                        continue
+                    days = _rel_days((nxt - today).days)
+                    if is_birth:
+                        line = (f"- Birthday: {nxt:%B} {day}" + (f" (born {year})" if year else "") +
+                                f". Next birthday: {nxt:%A, %B %d, %Y}, {days}" +
+                                (f"; {USER_NAME or 'the user'} turns {nxt.year - year}." if year else "."))
+                    else:
+                        line = f"- \"{label}\" = {nxt:%A, %B %d, %Y}, {days}."
+                    facts[key] = (0 if is_birth else 2, line)
+                else:
+                    when = _date(year, month, day)
+                    delta = (when - today).days
+                    if not -60 <= delta <= 400:       # far past/future dates are just noise
+                        continue
+                    past = " (already in the past)" if delta < 0 else ""
+                    facts[key] = (1 if delta >= 0 else 3,
+                                  f"- \"{label}\" = {when:%A, %B %d, %Y}, {_rel_days(delta)}{past}.")
+    if not facts:
+        return ""
+    lines = [line for _, line in sorted(facts.values(), key=lambda f: f[0])][:max_facts]
+    return (f"\nDate facts (computed for you — today is {today:%A, %B %d, %Y}). Use these numbers "
+            f"exactly and never calculate dates yourself. If a note says something \"will\" happen "
+            f"but its date is in the past, it already happened — use the past tense:\n"
+            + "\n".join(lines) + "\n")
+
+
 def _relative_event_label(start_iso: str) -> str:
     """Convert an ISO start string to a human-readable label with a relative-date hint.
     Example: 'Wednesday, June 4 at 8:00 PM (tomorrow)'
@@ -1497,8 +1965,9 @@ The user asked: "{question}"
 
 {events_context}
 
-List the relevant upcoming events in a friendly, natural way.
-Respond in {_LANG_NAMES.get(lang, 'English')}.
+Answer the question asked; only list events that are relevant to it.
+If the question is not about these events at all, answer it without mentioning them.
+Be friendly and natural. Respond in {_LANG_NAMES.get(lang, 'English')}.
 Keep it concise — 1 to 4 events max, summarise the rest if there are more."""
 
     return llm_invoke(format_prompt).strip()
@@ -1760,15 +2229,37 @@ def handle_view_emails(question: str, extracted: dict, lang: str = "en") -> str:
         ]
         emails_context = f"Today is: {current_date}\n\nRecent emails:\n" + "\n".join(lines)
 
+    is_voice = _current_voice.get()
+
+    if is_voice:
+        format_instructions = f"""Summarize the emails out loud in Chatette's warm, conversational voice — as if speaking to someone, not writing a list.
+Always mention emails about: purchases or orders, appointments or reservations, personal messages from real people, contracts or legal notices, job interviews or work offers, travel (flights, hotels, bookings). Skip newsletters, promotions, automated notifications, and social media alerts unless nothing else is present.
+Keep it to 2-4 natural sentences. No bullet points or dashes.
+If no important emails were found, say so in one friendly sentence.
+Respond in {_LANG_NAMES.get(lang, 'English')}.
+
+Example good response: "You got a couple of things worth noting — Ines sent you a message about weekend plans, and Dr. Müller's office confirmed your dental appointment for Thursday at 10."
+Example bad response (do NOT do this): "- From: LinkedIn | 5 new job suggestions. - From: Amazon | Today's deals." """
+    else:
+        format_instructions = f"""Summarize the emails below. Always mention emails about: purchases or orders, appointments or reservations, personal messages from real people, contracts or legal notices, job interviews or work offers, travel (flights, hotels, bookings). Skip newsletters, promotions, automated notifications, and social media alerts unless nothing else is present.
+
+Format: one bullet per email worth mentioning — sender, subject, and one sentence about the content if relevant.
+If no important emails were found, say so briefly.
+Respond in {_LANG_NAMES.get(lang, 'English')}.
+
+Examples:
+- From: Amazon | Order #123 shipped — your headphones are on the way, arriving Friday.
+- From: Dr. Müller's office | Appointment confirmation — dental check-up Thursday at 10am.
+- From: Ines | Weekend plans — she's asking if you're free Saturday.
+- From: Lufthansa | Your flight to Lisbon — booking confirmed, departs Oct 12 at 7:15am."""
+
     format_prompt = f"""{_persona_prompt(lang)}
 
 The user asked: "{question}"
 
 {emails_context}
 
-Summarise the relevant emails in a friendly, natural way.
-Respond in {_LANG_NAMES.get(lang, 'English')}.
-Keep it concise — highlight sender and subject, mention body only if relevant."""
+{format_instructions}"""
 
     return llm_invoke(format_prompt).strip()
 
@@ -1831,9 +2322,15 @@ Respond in {_LANG_NAMES.get(lang, 'English')}."""
 def handle_weather(question: str, extracted: dict, lang: str = "en") -> str:
     """Fetch weather and return a natural Chatette-style response with time-of-day temperatures and qualitative wind descriptions."""
     city = extracted.get("city", "").strip()
-    timeframe = extracted.get("timeframe", "today").lower()
+    timeframe = str(extracted.get("timeframe", "today")).lower()
 
-    if timeframe in ("now", "current", "currently", "jetzt", "aktuell", "ahora"):
+    # "3 days", "next 3 days", "3 Tage", "3 días" → first N days of the weekly forecast
+    days_match = re.search(r"(\d+)\s*(?:days?|tagen?|d[ií]as)", timeframe)
+    num_days = min(max(int(days_match.group(1)), 1), 7) if days_match else 0
+
+    if num_days > 1:
+        timeframe = "days"
+    elif timeframe in ("now", "current", "currently", "jetzt", "aktuell", "ahora"):
         timeframe = "now"
     elif timeframe in ("week", "weekly", "7 days", "woche", "semana", "this week"):
         timeframe = "week"
@@ -1848,6 +2345,9 @@ def handle_weather(question: str, extracted: dict, lang: str = "en") -> str:
             context = format_weather_context(data, "now")
         elif timeframe == "week":
             data = get_weekly_forecast(city)
+            context = format_weather_context(data, "week")
+        elif timeframe == "days":
+            data = get_weekly_forecast(city)[:num_days]
             context = format_weather_context(data, "week")
         elif timeframe == "tomorrow":
             data = get_weekly_forecast(city)
@@ -1877,15 +2377,17 @@ def handle_weather(question: str, extracted: dict, lang: str = "en") -> str:
 
 The user asked: "{question}"
 
-Here is the current weather data:
+Here is the weather data (this is the ONLY weather information you have):
 {context}
 
 Respond naturally in Chatette's voice — warm, concise, useful.
 Rules for your response:
+- Use only the data above: name the location it is for, and never make up or estimate temperatures, conditions or places that are not in it.
+- If the data covers several days, say a few words about each day (one short sentence per day).
 - Give temperatures with time references: say "X degrees in the morning / during the day / in the evening / at night", not "between X and Y degrees".
 - Describe wind qualitatively, not as a speed: use words like "calm", "light breeze", "moderate wind", "strong wind", "very windy". Never say km/h.
 - Mention rain only if it is likely (≥40% probability).
-- Keep it to 2-3 sentences maximum.
+- Otherwise keep it to 2-3 sentences maximum.
 Respond in {_LANG_NAMES.get(lang, 'English')}."""
 
     return llm_invoke(weather_prompt).strip()
@@ -1957,6 +2459,17 @@ def handle_confirmation(question: str, lang: str = "en") -> str:
             _pending().clear()
             return result
 
+        elif action == "delete_all":
+            count = delete_all_reminders()
+            ingest_notes()
+            _pending().clear()
+            return _t(
+                f"Done — cleared {count} reminder{'s' if count != 1 else ''}.",
+                f"Erledigt — {count} Erinnerungen gelöscht.",
+                f"Listo — {count} recordatorios eliminados.",
+                lang
+            )
+
         elif action == "personal_note":
             save_personal_note(reminder_text)
             try:
@@ -1985,17 +2498,6 @@ def handle_confirmation(question: str, lang: str = "en") -> str:
                 f"Done — {count} note{'s' if count != 1 else ''} added to your personal notes.",
                 f"Erledigt — {count} Eintrag/Einträge zu deinen persönlichen Notizen hinzugefügt.",
                 f"Listo — {count} nota{'s' if count != 1 else ''} añadida{'s' if count != 1 else ''} a tus notas personales.",
-                lang
-            )
-
-        elif action == "draft":
-            filename = save_draft(line_to_delete, reminder_text)
-            ingest_notes()
-            _pending().clear()
-            return _t(
-                f"Saved as '{filename}' in your drafts. You're all set.",
-                f"Als '{filename}' in deinen Entwürfen gespeichert.",
-                f"Guardado como '{filename}' en tus borradores.",
                 lang
             )
 
@@ -2155,18 +2657,18 @@ def handle_confirmation(question: str, lang: str = "en") -> str:
                 f"¿Eliminar '{line_to_delete}'? Sí o no.",
                 lang
             )
+        elif action == "delete_all":
+            return _t(
+                "Delete all reminders? Yes or no.",
+                "Alle Erinnerungen löschen? Ja oder Nein.",
+                "¿Eliminar todos los recordatorios? Sí o no.",
+                lang
+            )
         elif action == "personal_note":
             return _t(
                 "Add this to your personal notes? Yes or no.",
                 "Das zu deinen persönlichen Notizen hinzufügen? Ja oder Nein.",
                 "¿Añadir esto a tus notas personales? Sí o no.",
-                lang
-            )
-        elif action == "draft":
-            return _t(
-                "Save this draft? Yes or no.",
-                "Diesen Entwurf speichern? Ja oder Nein.",
-                "¿Guardar este borrador? Sí o no.",
                 lang
             )
         elif action == "create_list":
@@ -2335,9 +2837,11 @@ def handle_bulbs(question: str, lang: str = "en") -> str:
 RELEVANCE_THRESHOLD = 0.93
 
 
-def ask(question: str, mode: str = "auto", lang: str = "en", device_id: str = "app") -> str:
-    print(f"\nYou: {question} [mode: {mode}] [lang: {lang}] [device: {device_id}]")
+def ask(question: str, mode: str = "auto", lang: str = "en", device_id: str = "app", voice: bool = False) -> str:
+    print(f"\nYou: {question} [mode: {mode}] [lang: {lang}] [device: {device_id}] [voice: {voice}]")
     token = _current_device.set(device_id)
+    token_v = _current_voice.set(voice or device_id == "s_phone")
+    token_q = _current_question.set(question)
     try:
         answer = _ask_internal(question, mode, lang)
         _record_turn(question, answer)
@@ -2358,6 +2862,38 @@ def ask(question: str, mode: str = "auto", lang: str = "en", device_id: str = "a
         raise
     finally:
         _current_device.reset(token)
+        _current_voice.reset(token_v)
+        _current_question.reset(token_q)
+
+
+_SAVE_INTENTS = {"create_reminder", "create_event", "save_personal_note", "create_list"}
+
+# Read-only intents that personal mode answers from RAG instead of their own handler.
+_PERSONAL_RAG_INTENTS = {"general", "view_events", "view_reminders", "view_agenda", "view_emails"}
+
+# Words that show the user really wants something saved / scheduled (en, de, es).
+_EXPLICIT_SAVE_RE = re.compile(
+    r"\b(remind|reminder|remember|write (it |this |that )?down|note (it|this|that|down)|save|add|put|"
+    r"schedule|calendar|book|don't let me forget|do not let me forget|journal|diary|list|"
+    r"erinner|merk|notier|speicher|trag|kalender|termin eintragen|vergiss nicht|tagebuch|liste|"
+    r"recu[eé]rd|recordatorio|apunta|anota|guarda|agenda|calendario|no me dejes olvidar|diario|lista)",
+    re.IGNORECASE)
+# Messages that open by talking about oneself ("I have…", "I'm…", "My flight…") are sharing,
+# not giving an instruction — unlike bare to-dos such as "buy flowers on Sunday".
+_FIRST_PERSON_START_RE = re.compile(
+    r"^\s*(i|i'm|im|i've|i'll|my|we|we're|our|ich|mein|meine|wir|yo|tengo|estoy|mi|mis|voy)\b",
+    re.IGNORECASE)
+_QUESTION_START_RE = re.compile(
+    r"^\s*(what|how|why|when|where|which|who|do|does|did|can|could|should|would|will|is|are|any|"
+    r"was|wie|warum|wann|wo|welche|kannst|hast|soll|gibt|qué|que|cómo|como|por qué|cuándo|dónde|puedes|tienes|hay)\b",
+    re.IGNORECASE)
+
+
+def _looks_like_question(text: str) -> bool:
+    """True if any sentence of the message is a question or asks for advice."""
+    if "?" in text or re.search(r"\b(tips?|advice|ideas?|suggestions?|tipps?|rat|consejos?|ideas?)\b", text, re.IGNORECASE):
+        return True
+    return any(_QUESTION_START_RE.match(s) for s in re.split(r"[.!\n]+", text) if s.strip())
 
 
 def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
@@ -2372,7 +2908,10 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
 
     # 1. Pending confirmation — check before classification
     if _pending().action is not None:
-        answer = handle_confirmation(question, lang)
+        if _pending().action in DRAFT_STAGES:
+            answer = handle_draft_followup(question, lang)
+        else:
+            answer = handle_confirmation(question, lang)
         print(f"Chatette: {answer}")
         _ctx()["last_question"] = question
         _ctx()["last_answer"] = answer
@@ -2383,6 +2922,15 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
     intent = classification.intent
     confidence = classification.confidence
     extracted = classification.extracted
+
+    # 2a. Guard against "saving" small talk: small models file anything with a future date
+    # ("I'm having surgery in two days, any tips?") as a reminder/event/list. Without an
+    # explicit request to save something, questions and first-person statements go to
+    # normal conversation instead.
+    if (intent in _SAVE_INTENTS and not _EXPLICIT_SAVE_RE.search(question)
+            and (_looks_like_question(question) or _FIRST_PERSON_START_RE.match(question))):
+        print(f"↪️ '{intent}' overridden to 'general' — no explicit request to save anything")
+        intent, extracted = "general", {}
 
     # 2b. Phone shortcut hard-override — trust the key press, not the LLM classification.
     # Extraction still ran above so handler-specific data (text, title, etc.) is available.
@@ -2395,6 +2943,15 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
     if mode in _PHONE_INTENTS:
         intent = mode
         confidence = "high"
+
+    # 2c. Personal mode: every question is answered from the user's own data — the best
+    # RAG chunks across calendar, emails, notes and lists — instead of the specialised
+    # "show me…" handlers (e.g. "when is my birthday?" was sent to view_events and came
+    # back as a calendar listing). Actions (create/delete/lights/TV…) are unaffected.
+    if mode == "personal" and intent in _PERSONAL_RAG_INTENTS:
+        if intent != "general":
+            print(f"↪️ Personal mode: '{intent}' answered from personal data (RAG)")
+        intent, confidence = "general", "high"
 
     # 3. Low confidence on action intents → ask for clarification
     if confidence == "low" and intent != "general":
@@ -2437,7 +2994,8 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
     elif intent == "save_personal_note":
         answer = handle_personal_note(question, extracted, lang)
     elif intent == "create_draft":
-        answer = handle_draft(question, extracted, lang)
+        # Typed chat gets the guided flow (questions first); voice drafts are written right away.
+        answer = handle_draft(question, extracted, lang, guided=not _current_voice.get())
     elif intent == "create_list":
         answer = handle_create_list(question, extracted, lang)
     elif intent == "add_to_list":
@@ -2485,61 +3043,102 @@ def _handle_general(question: str, mode: str, lang: str) -> str:
     )
 
     if mode == "general":
-        print("Mode: general knowledge")
+        print("Mode: general knowledge (+ calendar context)")
+        cal_scored = [(doc, score) for doc, score in _retrieve_scored(question, collections=("calendar",))
+                      if score <= RELEVANCE_THRESHOLD]
+        if cal_scored:
+            return _rag_query(question, scored=cal_scored, lang=lang)
         return llm_invoke(_general_prompt_base.format(question=question)).strip()
 
     if mode == "personal":
         print("Mode: personal/RAG")
-        return _rag_query(question, k_emails=7, k_other=5, lang=lang)
+        return _rag_query(question, lang=lang)
 
-    all_docs = []
-    best_score = float("inf")
-
-    for collection in ["calendar", "emails", "notes", "lists", "documents"]:
-        k = 7 if collection == "emails" else 5
-        try:
-            results = vectorstore.similarity_search_with_score(
-                question, k=k,
-                filter={"collection": collection}
-            )
-            for doc, score in results:
-                all_docs.append(doc)
-                if score < best_score:
-                    best_score = score
-        except Exception as e:
-            print(f"Could not retrieve from '{collection}': {e}")
-            continue
-
+    scored = _retrieve_scored(question)
+    best_score = min((score for _, score in scored), default=float("inf"))
     print(f"Best relevance score: {best_score:.3f}")
 
-    if best_score > RELEVANCE_THRESHOLD or not all_docs:
+    if best_score > RELEVANCE_THRESHOLD:
         print("Using general knowledge...")
         return llm_invoke(_general_prompt_base.format(question=question)).strip()
 
-    return _rag_query(question, k_emails=7, k_other=5, docs=all_docs, lang=lang)
+    return _rag_query(question, scored=scored, lang=lang)
 
 
-def _rag_query(question: str, k_emails: int = 7, k_other: int = 5,
-               docs: list = None, lang: str = "en") -> str:
-    """Run RAG query with provided or freshly retrieved docs."""
-    if docs is None:
-        docs = []
-        for collection in ["calendar", "emails", "notes", "lists", "documents"]:
-            k = k_emails if collection == "emails" else k_other
+RAG_COLLECTIONS = ("calendar", "emails", "notes", "lists", "documents")
+MAX_CONTEXT_CHARS = 2400
+
+
+def _retrieve_scored(question: str, collections=RAG_COLLECTIONS,
+                     k_emails: int = 7, k_other: int = 5) -> list[tuple]:
+    """Top-k (doc, distance) pairs from each collection. Lower distance = more relevant."""
+    scored = []
+    for collection in collections:
+        k = k_emails if collection == "emails" else k_other
+        while k >= 1:
             try:
-                results = vectorstore.similarity_search(
-                    question, k=k,
-                    filter={"collection": collection}
-                )
-                docs.extend(results)
+                scored += vectorstore.similarity_search_with_score(
+                    question, k=k, filter={"collection": collection})
+                break
             except Exception as e:
-                print(f"Could not retrieve from '{collection}': {e}")
-                continue
+                # The HNSW index can fail to return k hits ("ef or M is too small");
+                # retry with fewer instead of silently giving up on the collection.
+                if "contiguous" in str(e).lower() or "ef" in str(e).lower():
+                    print(f"⚠️ '{collection}': search for k={k} failed ({e}) — retrying with fewer")
+                    k //= 2
+                else:
+                    print(f"Could not retrieve from '{collection}': {e}")
+                    break
+    return scored
 
-    context = "\n\n".join([doc.page_content for doc in docs])
-    MAX_CONTEXT_CHARS = 2400
-    if len(context) > MAX_CONTEXT_CHARS:
-        context = context[:MAX_CONTEXT_CHARS] + "..."
+
+def _select_chunks(scored: list[tuple], max_chars: int = MAX_CONTEXT_CHARS) -> tuple[list, list]:
+    """Pool chunks from all collections, best (lowest distance) first, drop exact
+    duplicates, and fill the context budget best-first.
+
+    Returns (selected_docs, rows) where rows describe every candidate for the log.
+    """
+    ranked = sorted(scored, key=lambda pair: pair[1])
+    selected, rows, seen, used = [], [], set(), 0
+    for doc, score in ranked:
+        text = doc.page_content.strip()
+        if text in seen:
+            rows.append((doc, score, "DUPLICATE (skipped)"))
+            continue
+        seen.add(text)
+        cost = len(text) + (2 if selected else 0)          # "\n\n" separator
+        if used + cost <= max_chars:
+            selected.append(doc)
+            used += cost
+            rows.append((doc, score, "SENT"))
+        else:
+            rows.append((doc, score, "DROPPED (over limit)"))
+    return selected, rows
+
+
+def _log_rag_chunks(question: str, rows: list, max_chars: int) -> None:
+    """Print every candidate chunk to the session log, best first, and whether it reached the LLM.
+    Scores are Chroma distances: lower = more relevant."""
+    sent = sum(1 for *_, status in rows if status == "SENT")
+    print(f"\n📚 RAG chunks for: {question!r} — {len(rows)} candidates, {sent} sent "
+          f"(best first, context limit {max_chars} chars)")
+    for i, (doc, score, status) in enumerate(rows, 1):
+        meta = doc.metadata or {}
+        print(f"  [{i:02d}] {status:<22} score {score:.3f} | "
+              f"{meta.get('collection', '?')}/{meta.get('source_file', '?')}")
+        text = " ".join(doc.page_content.split())          # one line, whitespace collapsed
+        print("       " + (text[:60] + " [...]" if len(text) > 60 else text))
+    print("📚 end of chunks\n")
+
+
+def _rag_query(question: str, scored: list[tuple] | None = None, lang: str = "en") -> str:
+    """Answer from the most relevant chunks. `scored` = (doc, distance) pairs; retrieved
+    from every collection when not given."""
+    if scored is None:
+        scored = _retrieve_scored(question)
+    docs, rows = _select_chunks(scored)
+    _log_rag_chunks(question, rows, MAX_CONTEXT_CHARS)
+    context = "\n\n".join(doc.page_content.strip() for doc in docs)
 
     now = datetime.now()
     current_date = now.strftime("%A, %B %d, %Y at %I:%M %p")
@@ -2549,10 +3148,12 @@ def _rag_query(question: str, k_emails: int = 7, k_other: int = 5,
     memory_block = get_memory_block()
     episode_block = retrieve_episodes(question) if is_personal_query(question) else ""
 
+    date_facts = _date_facts(USER_PROFILE or "", context)
+
     context = f"""Today is: {current_date}
 Tomorrow is: {tomorrow}
 The day after tomorrow is: {day_after}
-
+{date_facts}
 {_build_conversation_context()}{context}{memory_block}{episode_block}"""
 
     formatted_prompt = prompt_template.format(

@@ -29,3 +29,5 @@ __pycache__/
 
 # PyCharm
 .idea/
+# Backups of .env (contain secrets too) — env.template.txt is not affected
+.env.*

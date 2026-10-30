@@ -223,7 +223,7 @@ def get_recent_emails(max_results: int = 10, days_window: int = None) -> list[Em
     results = service.users().messages().list(
         userId="me",
         maxResults=max_results,
-        labelIds=["INBOX"],
+        labelIds=["INBOX", "CATEGORY_PERSONAL"],
         q=f"after:{after_timestamp}"
     ).execute()
 
