@@ -81,10 +81,12 @@ else:
 
 def reload_llm():
     """Hot-reload the LLM and calendar constants from .env (called after settings save)."""
-    global llm, OLLAMA_MODEL, THINKING_ENABLED, CALENDAR_DAYS_AHEAD, CALENDAR_DAYS_BEHIND
+    global llm, OLLAMA_MODEL, THINKING_ENABLED, CALENDAR_DAYS_AHEAD, CALENDAR_DAYS_BEHIND, AUTO_RAG_SELECTOR
     load_dotenv(override=True)
     OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
     THINKING_ENABLED = os.getenv("THINKING_ENABLED", "false").lower() == "true"
+    AUTO_RAG_SELECTOR = os.getenv("AUTO_RAG_SELECTOR", "false").lower() == "true"
+    print(f"Auto RAG selector: {'on' if AUTO_RAG_SELECTOR else 'off'}")
     CALENDAR_DAYS_AHEAD = int(os.getenv("CALENDAR_DAYS_AHEAD", "14"))
     CALENDAR_DAYS_BEHIND = int(os.getenv("CALENDAR_DAYS_BEHIND", "1"))
     llm = OllamaLLM(base_url=OLLAMA_BASE_URL, model=OLLAMA_MODEL)
@@ -304,6 +306,43 @@ Answer:""",
 _current_device: ContextVar[str] = ContextVar("device_id", default="app")
 _current_voice: ContextVar[bool] = ContextVar("voice", default=False)
 _current_question: ContextVar[str] = ContextVar("question", default="")
+
+# ── Auto RAG selector ───────────────────────────────────────────────────────────────
+# On: chat modes are ignored. For general-conversation questions a separate small yes/no
+# model call ("is this about the user's personal life?") decides: yes → always search
+# personal data; no → the usual relevance cut-off. Off: auto/personal/general modes as
+# before. Set via Settings (AUTO_RAG_SELECTOR in .env). Tested in
+# experiments/agentic_rag (variant E): 28/30 personal, 30/30 general correct.
+AUTO_RAG_SELECTOR = os.getenv("AUTO_RAG_SELECTOR", "false").lower() == "true"
+
+_ABOUT_USER_PROMPT = """Decide whether answering this question requires personal information about the user
+({user}) — his own life, body, health, family, friends, people he knows, home, plans,
+schedule, history, preferences, notes or emails.
+
+- true: the question is about people or facts of {user}'s personal life, so the answer
+  depends on his own data.
+- false: the answer is general/world knowledge — even if phrased personally, when the
+  personal wording only wraps a general fact ("do I know the capital of France?", "am I aware
+  that ice is cold?", "should I know…") — or it is about public figures or well-known things,
+  even ones known by a first name (e.g. Claude).
+
+Examples of true: "am I vegetarian?", "do I have a car?". Examples of false: "do I know who
+wrote Hamlet?", "who is Claude?".
+
+Question: "{q}"
+Reply with only: true or false"""
+
+
+def _ask_about_user(question: str) -> bool:
+    """The yes/no call of the auto RAG selector (one small model call, ~0.1 s)."""
+    try:
+        reply = llm_invoke(_ABOUT_USER_PROMPT.format(user=USER_NAME, q=question)).strip().lower()
+        return reply.startswith("true")
+    except RateLimitError:
+        raise
+    except Exception as e:
+        print(f"⚠️ about_user call failed ({e}) — using the relevance cut-off")
+        return False
 
 _pending_state: dict[str, "PendingState"] = {}
 _conversation_contexts: dict[str, dict] = {}
@@ -2898,6 +2937,14 @@ def _looks_like_question(text: str) -> bool:
 
 def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
 
+    # Auto RAG selector on: the chat modes (auto/personal/general) are ignored — Chatette
+    # decides herself, per question, whether to look in personal data (see _handle_general).
+    # Phone key intents (create_reminder, …) and control_bulbs are not chat modes and stay.
+    if AUTO_RAG_SELECTOR and mode in ("auto", "personal", "general"):
+        if mode != "auto":
+            print(f"↪️ Auto RAG selector on: '{mode}' mode ignored")
+        mode = "auto"
+
     # 0. Hardware shortcut — skip classification for direct-intent modes
     if mode == "control_bulbs":
         answer = handle_bulbs(question, lang)
@@ -3053,6 +3100,14 @@ def _handle_general(question: str, mode: str, lang: str) -> str:
     if mode == "personal":
         print("Mode: personal/RAG")
         return _rag_query(question, lang=lang)
+
+    if AUTO_RAG_SELECTOR:
+        about_user = _ask_about_user(question)
+        print(f"🔎 Auto RAG selector: about_user={about_user}")
+        if about_user:
+            print("Mode: auto → about_user=true → personal data (RAG)")
+            return _rag_query(question, lang=lang)
+        # about_user=false: fall through to the relevance cut-off below (as in plain auto mode)
 
     scored = _retrieve_scored(question)
     best_score = min((score for _, score in scored), default=float("inf"))

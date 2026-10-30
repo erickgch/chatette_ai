@@ -192,6 +192,8 @@ class SettingsRequest(BaseModel):
     calendar_days_ahead: int
     calendar_days_behind: int
     thinking_enabled: bool = False
+    # None = not sent (e.g. the phone app, which doesn't know this setting) → keep current value
+    auto_rag_selector: bool | None = None
 
 class ReminderResponse(BaseModel):
     index: int
@@ -885,6 +887,8 @@ def save_settings(request: SettingsRequest):
         calendar_days_ahead=request.calendar_days_ahead,
         calendar_days_behind=request.calendar_days_behind,
         thinking_enabled=request.thinking_enabled,
+        auto_rag_selector=(current.auto_rag_selector if request.auto_rag_selector is None
+                           else request.auto_rag_selector),
     )
     success = write_settings(updated)
     if not success:

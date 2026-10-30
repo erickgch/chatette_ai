@@ -22,6 +22,8 @@ class ChatetteSettings(BaseModel):
     calendar_days_ahead: int
     calendar_days_behind: int
     thinking_enabled: bool = False
+    # On: Chatette decides per question whether to use personal data (modes ignored).
+    auto_rag_selector: bool = False
 
     @field_validator("email_days_window", "calendar_days_ahead", "calendar_days_behind")
     @classmethod
@@ -48,6 +50,7 @@ def read_settings() -> ChatetteSettings:
     if model_selection not in _VALID_MODELS:
         model_selection = "qwen3:8b"
     thinking_enabled = os.getenv("THINKING_ENABLED", "false").lower() == "true"
+    auto_rag_selector = os.getenv("AUTO_RAG_SELECTOR", "false").lower() == "true"
 
     try:
         return ChatetteSettings(
@@ -57,6 +60,7 @@ def read_settings() -> ChatetteSettings:
             calendar_days_ahead=int(os.getenv("CALENDAR_DAYS_AHEAD", "14")),
             calendar_days_behind=int(os.getenv("CALENDAR_DAYS_BEHIND", "1")),
             thinking_enabled=thinking_enabled,
+            auto_rag_selector=auto_rag_selector,
         )
     except ValidationError as e:
         print(f"⚠️ Settings validation error: {e}")
@@ -76,6 +80,9 @@ def write_settings(settings: ChatetteSettings) -> bool:
         content = _set_env_value(content, "USE_GROQ", "false")
         content = _set_env_value(
             content, "THINKING_ENABLED", "true" if settings.thinking_enabled else "false"
+        )
+        content = _set_env_value(
+            content, "AUTO_RAG_SELECTOR", "true" if settings.auto_rag_selector else "false"
         )
         content = _set_env_value(
             content, "EMAIL_DAYS_WINDOW", str(settings.email_days_window)
