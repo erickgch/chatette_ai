@@ -74,7 +74,7 @@ like any AI assistant, but running on your own terms.
 Speak to Chatette using your microphone. She transcribes with Whisper, responds via the LLM,
 and speaks back using Piper TTS.
 
-**Supported voice languages:** English (en_US-libritts_r-medium), German (de_DE-ramona-low),
+**Supported voice languages:** English (en_US-libritts_r-medium), German (de_DE-kerstin-low),
 Spanish (es_AR-daniela-high).
 
 Select your language with the flag buttons in the app before pressing the mic.
@@ -232,7 +232,7 @@ Available voice models:
 | Language | Model file |
 |---|---|
 | English | `en_US-libritts_r-medium.onnx` |
-| German | `de_DE-ramona-low.onnx` |
+| German | `de_DE-kerstin-low.onnx` |
 | Spanish | `es_AR-daniela-high.onnx` |
 
 ---

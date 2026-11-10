@@ -510,7 +510,7 @@ _device_last_lang: dict[str, str] = {}
 
 _PIPER_VOICE_MAP = {
     "en": None,  # resolved at runtime from PIPER_VOICE env var
-    "de": "piper/de_DE-ramona-low.onnx",
+    "de": "piper/de_DE-kerstin-low.onnx",
     "es": "piper/es_AR-daniela-high.onnx",
 }
 
