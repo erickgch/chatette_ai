@@ -67,8 +67,8 @@ CHATETTE — PIPELINE AND WORKFLOW
 
  scheduler.py (thread started by api.py)
    +- every 15 min:  calendar sync + email sync --> ingestion.py --> ChromaDB  (only changed chunks)
-   +- daily 08:00:   notification texts (LLM) --> data/notes/notifications_cache.json --> phone app
-   +- notes folder watcher --> re-ingest notes & lists on file change
+   +- daily 08:00:   notification texts (LLM) --> data/docs/notifications_cache.json --> phone app
+   +- docs folder watcher --> re-ingest notes & lists on file change
 
  ingestion.py:  fetch source --> split (512 chars / 50 overlap) --> clean (drop empty chunks)
                 --> stable content IDs --> add new / delete vanished --> ChromaDB

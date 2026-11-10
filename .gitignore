@@ -31,3 +31,6 @@ __pycache__/
 .idea/
 # Backups of .env (contain secrets too) — env.template.txt is not affected
 .env.*
+
+# Recovery sheet with every secret — never commit (see CHATETTE_RECOVERY.txt)
+CHATETTE_RECOVERY*

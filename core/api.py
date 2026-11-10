@@ -65,7 +65,6 @@ os.environ["CHROMA_TELEMETRY"] = "false"
 from fastapi import FastAPI, Form, HTTPException, UploadFile, File, Header, Request
 from scheduler import start_scheduler
 from rag_lw import ask, handle_reminder, handle_calendar_event, handle_delete, handle_delete_event, handle_draft, handle_personal_note, handle_weather, clear_device_context, clear_device_pending, device_has_pending, handle_set_alarm, get_last_alarm
-from memory.memory_router import router as memory_router
 import bulb_controller
 from chatette_tv import channel_registry as _channel_registry
 from chatette_tv.cast_router import router as cast_router
@@ -89,11 +88,11 @@ except Exception:
 # ===================================
 
 def _start_notes_watcher():
-    """Watch data/notes/ for .txt changes and re-ingest automatically."""
+    """Watch data/docs/ for .txt changes and re-ingest automatically."""
     from watchdog.observers import Observer
     from watchdog.events import FileSystemEventHandler
 
-    notes_dir = Path(__file__).parent.parent / "data" / "notes"
+    notes_dir = Path(__file__).parent.parent / "data" / "docs"
     _debounce_timer: dict = {}
 
     class _Handler(FileSystemEventHandler):
@@ -138,21 +137,50 @@ async def lifespan(app: FastAPI):
     print("🛑 Shutting down...")
 
 
+# ===================================
+# API key — every request must carry X-API-Key (except "/", the reachability ping)
+# ===================================
+# Without it, any device on the network (or a web page open in the browser) could read
+# notes and emails, write to the calendar, change settings, switch lights and TV.
+# Fails closed: no key configured → every request is refused.
+
+import secrets
+API_KEY = os.getenv("CHATETTE_API_KEY", "")
+_OPEN_PATHS = {"/"}
+
+if not API_KEY:
+    print("❌ CHATETTE_API_KEY is not set in .env — all API requests will be refused")
+
+
+def require_api_key(request: Request):
+    if request.url.path in _OPEN_PATHS:
+        return
+    sent = request.headers.get("X-API-Key", "")
+    if not API_KEY or not secrets.compare_digest(sent.encode(), API_KEY.encode()):
+        print(f"🔒 Refused {request.method} {request.url.path} from "
+              f"{request.client.host if request.client else '?'} — {'wrong' if sent else 'no'} API key")
+        raise HTTPException(status_code=401, detail="invalid_api_key")
+
+
+from fastapi import Depends
 app = FastAPI(
     title="Chatette Personal Assistant API",
     description="Your local AI personal assistant",
     version="4.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    dependencies=[Depends(require_api_key)],
+    # The interactive docs would list every endpoint without needing the key
+    docs_url=None, redoc_url=None, openapi_url=None,
 )
 app.include_router(cast_router, prefix="/cast")
-app.include_router(memory_router)
 
 # Allow the browser UI (chatette_web/index.html, opened from disk) to call the API.
+# A page opened from disk has the origin "null"; no other web page may call the API.
 # expose_headers lets the page read the transcript/answer headers of /voice/chat.
 from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["null"],
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["X-Transcript", "X-Answer", "X-Awaiting-Confirm",
@@ -370,20 +398,26 @@ def command(request: CommandRequest, http: Request, x_device: str = Header(None,
     """
     cmd = request.command.strip().lower()
     payload = request.payload.strip()
-    lang = request.lang
+    # Answer in the language the user typed in (the app sends its UI language)
+    from rag_lw import _detect_language
+    lang = _detect_language(payload, request.lang) if payload else request.lang
     print(f"📱 Command from {_client_label(http, x_device)}: command='{cmd}' payload='{payload}'")
 
     # Build a synthetic question from command + payload for context
     question = payload if payload else cmd
 
+    # Same device as the chat: a confirmation question ("Save this event?") must be pending
+    # on the device that will answer "yes" (the app's buttons send no header → "app").
+    from rag_lw import _current_device, _remember
+    device_token = _current_device.set(x_device or "app")
     try:
         if cmd == "reminder":
             extracted = {"items": [payload]} if payload else {}
             answer = handle_reminder(question, extracted, lang)
 
         elif cmd == "calendar":
-            extracted = {"title": payload, "description": ""} if payload else {}
-            answer = handle_calendar_event(question, extracted, lang)
+            # No title hint: the payload holds date and time too, and the model copies a hint verbatim
+            answer = handle_calendar_event(question, {}, lang)
 
         elif cmd == "draft":
             extracted = {"type": "", "purpose": payload} if payload else {}
@@ -421,13 +455,18 @@ def command(request: CommandRequest, http: Request, x_device: str = Header(None,
             raise HTTPException(status_code=400, detail=f"Unknown command: {cmd}")
 
         print(f"✅ Command '{cmd}' → '{answer[:80]}...'")
+        _remember(question, answer)   # so a follow-up ("Ja", "make it 11") has the context
         return AnswerResponse(question=question, answer=answer, mode="command")
 
+    except HTTPException:
+        raise
     except Exception as e:
         error_str = str(e).lower()
         if "rate limit" in error_str or "429" in error_str or "quota" in error_str:
             raise HTTPException(status_code=429, detail="rate_limit_reached")
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        _current_device.reset(device_token)
 
 
 # ===================================
@@ -749,6 +788,66 @@ def delete_personal_notes_endpoint():
     return {"status": "Personal notes cleared"}
 
 
+# One note at a time — used by the note-list editors. A note's header (creation time, and
+# whether it is timestamped or timeless) is set once when it is added and never changes;
+# it is the note's id. Editing only changes the text.
+
+class PersonalNote(BaseModel):
+    id: str
+    created: str
+    timeless: bool
+    text: str
+
+class PersonalNotesListResponse(BaseModel):
+    notes: list[PersonalNote]
+    legacy_text: str = ""          # text without headers (old format), if any is left
+
+class PersonalNoteCreateRequest(BaseModel):
+    text: str
+    timestamped: bool = True       # False → a timeless note (lasting fact)
+
+class PersonalNoteEditRequest(BaseModel):
+    text: str
+
+
+@app.get("/personal-notes/items", response_model=PersonalNotesListResponse)
+def list_personal_notes_endpoint():
+    """All personal notes, oldest first."""
+    from note_manager import _read_personal_notes
+    preamble, notes = _read_personal_notes()
+    return {"notes": notes, "legacy_text": preamble}
+
+@app.post("/personal-notes/items", response_model=PersonalNote)
+def add_personal_note_endpoint(request: PersonalNoteCreateRequest):
+    """Add a note; its header is fixed from now on."""
+    from note_manager import add_personal_note
+    note = add_personal_note(request.text, timestamped=request.timestamped)
+    if not note:
+        raise HTTPException(status_code=400, detail="Note text cannot be empty")
+    ingest_notes()
+    return note
+
+@app.put("/personal-notes/items/{note_id}")
+def edit_personal_note_endpoint(note_id: str, request: PersonalNoteEditRequest):
+    """Change a note's text (its header stays the same)."""
+    from note_manager import edit_personal_note
+    if not request.text.strip():
+        raise HTTPException(status_code=400, detail="Note text cannot be empty — delete the note instead")
+    if not edit_personal_note(note_id, request.text):
+        raise HTTPException(status_code=404, detail="Note not found")
+    ingest_notes()
+    return {"status": "Note updated"}
+
+@app.delete("/personal-notes/items/{note_id}")
+def delete_personal_note_endpoint(note_id: str):
+    """Delete one note."""
+    from note_manager import delete_personal_note
+    if not delete_personal_note(note_id):
+        raise HTTPException(status_code=404, detail="Note not found")
+    ingest_notes()
+    return {"status": "Note deleted"}
+
+
 # ===================================
 # Drafts
 # ===================================
@@ -909,7 +1008,7 @@ def get_notifications_cache():
     import json
     from pathlib import Path
 
-    cache_path = Path(os.getenv("NOTES_PATH", ".")) / "notifications_cache.json"
+    cache_path = Path(os.getenv("DOCS_PATH", ".")) / "notifications_cache.json"
 
     if not cache_path.exists():
         raise HTTPException(

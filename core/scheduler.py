@@ -10,12 +10,12 @@ from pathlib import Path
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-NOTES_PATH = os.getenv("NOTES_PATH")
+DOCS_PATH = os.getenv("DOCS_PATH")
 
 
 # ===== Notes File Watcher =====
 class NotesChangeHandler(FileSystemEventHandler):
-    """Re-ingests notes whenever a file in the notes folder changes."""
+    """Re-ingests notes whenever a file in the docs folder changes."""
 
     def on_modified(self, event):
         if not event.is_directory:
@@ -134,7 +134,7 @@ Write the message now:"""
         }
 
         # Save to a JSON file so the API endpoint can serve it quickly
-        cache_path = Path(os.getenv("NOTES_PATH", ".")) / "notifications_cache.json"
+        cache_path = Path(os.getenv("DOCS_PATH", ".")) / "notifications_cache.json"
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump(cache, f, ensure_ascii=False, indent=2)
 
@@ -150,7 +150,7 @@ Write the message now:"""
 # ===== Main Scheduler =====
 def start_scheduler():
     print("🚀 Scheduler started!")
-    print(f"📁 Watching notes folder: {NOTES_PATH}")
+    print(f"📁 Watching docs folder: {DOCS_PATH}")
 
     # Schedule Google sync every 30 minutes
     schedule.every(15).minutes.do(sync_all)
@@ -161,6 +161,9 @@ def start_scheduler():
     # Run initial sync and cache generation at startup
     print("\n🔄 Running initial sync...")
     sync_all()
+    # Notes and lists too: picks up chunking changes after an update and files that were
+    # deleted while the backend was off (the folder watcher only sees creates/edits).
+    _run_job("Notes sync", lambda: (ingest_notes(), ingest_lists()))
 
     print("\n🔔 Generating initial notifications cache...")
     generate_notifications_cache()
@@ -168,9 +171,9 @@ def start_scheduler():
     # Start notes file watcher
     event_handler = NotesChangeHandler()
     observer = Observer()
-    observer.schedule(event_handler, path=NOTES_PATH, recursive=True)
+    observer.schedule(event_handler, path=DOCS_PATH, recursive=True)
     observer.start()
-    print("👀 Watching notes folder for changes...\n")
+    print("👀 Watching docs folder for changes...\n")
 
     try:
         while True:

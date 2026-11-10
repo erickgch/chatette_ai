@@ -8,11 +8,11 @@ from pydantic import BaseModel, field_validator, ValidationError, ConfigDict
 
 load_dotenv()
 
-NOTES_PATH = os.getenv("NOTES_PATH")
-REMINDERS_FILE = os.path.join(NOTES_PATH, "reminders.txt")
-PERSONAL_NOTES_FILE = os.path.join(NOTES_PATH, "personal_notes.txt")
-LISTS_PATH = os.path.join(NOTES_PATH, "lists")
-SYNC_META_FILE = os.path.join(NOTES_PATH, "sync_meta.json")
+DOCS_PATH = os.getenv("DOCS_PATH")
+REMINDERS_FILE = os.path.join(DOCS_PATH, "reminders.txt")
+PERSONAL_NOTES_FILE = os.path.join(DOCS_PATH, "personal_notes.txt")
+LISTS_PATH = os.path.join(DOCS_PATH, "lists")
+SYNC_META_FILE = os.path.join(DOCS_PATH, "sync_meta.json")
 
 
 # ===========================
@@ -233,7 +233,7 @@ def apply_push(payload: dict) -> dict:
                 # Both sides changed — conflict: keep PC, save phone copy
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 conflict_filename = f"journal_offline_edit_{ts}.txt"
-                conflict_path = os.path.join(NOTES_PATH, conflict_filename)
+                conflict_path = os.path.join(DOCS_PATH, conflict_filename)
                 _write_file(conflict_path, phone_notes["content"])
                 pending = meta.get("pending_conflict_files", [])
                 pending.append(conflict_filename)

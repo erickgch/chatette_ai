@@ -3,6 +3,7 @@ import json
 import re
 import requests
 import threading
+import time
 from contextvars import ContextVar
 from pathlib import Path
 from dotenv import load_dotenv
@@ -28,8 +29,6 @@ from weather import (
 )
 from places import search_places
 from pydantic import BaseModel, field_validator, ValidationError, ConfigDict
-from memory.summarizer import get_memory_block, retrieve_episodes, is_personal_query, run_summarizer
-from memory.memory_router import init_router
 
 load_dotenv()
 os.chdir(Path(__file__).parent.parent)
@@ -244,7 +243,7 @@ Your personality:
 - Diligent, accurate, but friendly. You answer first, add warmth second.
 - Never over-explain or pad responses with unnecessary pleasantries.
 - Never apologize unnecessarily.
-- Always respond in {lang_name}."""
+- LANGUAGE: always answer in the language of the user's message (German message → German answer, Spanish → Spanish, English → English), even if the data or context you were given is in another language. Only if the message's language is unclear, use {lang_name}."""
 
 CHATETTE_RULES = """
 STRICT RULES:
@@ -254,7 +253,9 @@ STRICT RULES:
 - If the question refers to a previous exchange, use it to answer correctly. But your notes and the context are the source of truth: if your previous answer contradicts them, trust the notes and correct yourself.
 - When the question is about {user_name} personally (family, relationships, health, history, preferences, plans), look for the answer in the personal notes in the context as well — not only in the profile.
 - Never invent personal information that is not in the profile or the personal notes.
+- Each personal note starts with a header. "[YYYY-MM-DD HH:MM]" is when {user_name} wrote that note — use it for "when" questions (e.g. "In June 2026 you wrote that you wanted to…"). "[timeless · created …]" marks a lasting fact about him: never attach a date to it; the creation date is only its ID.
 - Never refer to {user_name} in third person — use 'you' and 'your'.
+- {user_name}'s notes are written by him in first person: "I"/"my" in a note means {user_name}. When answering, turn them into "you"/"your" (German "du"/"dein", Spanish "tú"/"tu") — never answer as "I" as if you were {user_name}. Answer the question in your own words; don't copy note text.
 - When corrected on a factual error, say so briefly and drop it. Never propose an alternative wrong answer as a recovery.
 - Never claim to control hardware or services not explicitly listed in your tools. You can control smart bulbs. That is all.
 - Use only the parts of the context that answer the question. Never mention unrelated calendar events, reminders, emails or notes.
@@ -269,26 +270,20 @@ prompt_template = PromptTemplate(
 If you don't find the answer in the context, say so briefly.
 Use ONLY context that directly answers the question asked. Ignore everything else in the context.
 
-Examples:
-Context: Today is Monday, March 16, 2026. Calendar event: Dentist on Wednesday, March 18 at 10am.
-{user_name}: What day is today?
-Chatette: Today is Monday, March 16, 2026.
+Examples of the answer FORMAT. Words in <angle brackets> are placeholders for values that
+would come from the real context — they are NOT facts about {user_name}; never use them.
 
-Context: Today is Tuesday, September 15, 2026. Calendar: dentist at 10am, movies with Ines at 8pm.
-{user_name}: Do I have anything today?
-Chatette: Yes — dentist at 10am and movies with Ines at 8pm.
+Context: Today is <weekday, date>. Calendar event: <appointment> on <day> at <time>.
+{user_name}: Do I have anything on <day>?
+Chatette: Yes — <appointment> at <time>.
 
-Context: Note: I was on vacation in Brittany and Normandy in France in August 2026. Visited Fecamp, Etretat, Saint Malo and Perros-Guirec.
-{user_name}: Have I been to France, and if so, where?
-Chatette: Yes — Brittany and Normandy in summer 2026. You visited Fecamp, Etretat, Saint Malo and Perros-Guirec.
+Context: Note: I spent a week in <city> in <month> and loved the food.
+{user_name}: Have I been to <country>?
+Chatette: Yes — you spent a week in <city> in <month>.
 
-Context: Note: I am preparing for the Kölner Marathon on October 4th. I will run the relay, covering 11.5 km. Training: 06.09: 6.7 km, 08.09: 5 km, 14.09: 8.2 km.
-{user_name}: How is my marathon training going?
-Chatette: You're running the Kölner Marathon relay on October 4th — 11.5 km. Your last three runs: 6.7 km, 5 km, and 8.2 km.
-
-Context: Note: I am allergic to birches and alders.
+Context: Note: I am allergic to <thing>.
 {user_name}: Do I have any allergies?
-Chatette: Yes — birches and alders.
+Chatette: Yes — you're allergic to <thing>.
 
 Context: (no relevant information found)
 {user_name}: What's my blood type?
@@ -345,9 +340,17 @@ def _ask_about_user(question: str) -> bool:
         return False
 
 _pending_state: dict[str, "PendingState"] = {}
-_conversation_contexts: dict[str, dict] = {}
-_turn_history: dict[str, list[dict]] = {}
-SUMMARIZER_TRIGGER = 20
+
+# ── Short-term memory ───────────────────────────────────────────────────────────────
+# Per device, the last SHORT_TERM_TURNS exchanges (question + answer), so follow-up
+# questions work ("do I have a brother?" → "where does he live?"). Kept in memory only:
+# forgotten after SHORT_TERM_TTL_SECONDS of silence on that device, and on restart.
+# (Replaces the former 20-turn summariser, which never triggered in practice and pasted
+# unchecked "learned facts" — one of them wrong — into every prompt.)
+SHORT_TERM_TURNS = 3
+SHORT_TERM_TTL_SECONDS = 3600
+SHORT_TERM_MAX_CHARS = 300          # per question / answer in the prompt
+_conversation_contexts: dict[str, dict] = {}   # device → {"turns": [...], "last_activity": ts}
 
 
 def _pending() -> "PendingState":
@@ -358,16 +361,26 @@ def _pending() -> "PendingState":
 
 
 def _ctx() -> dict:
+    """This device's short-term memory; emptied first if it has been silent too long."""
     device = _current_device.get()
-    if device not in _conversation_contexts:
-        _conversation_contexts[device] = {"last_question": None, "last_answer": None}
-    return _conversation_contexts[device]
+    ctx = _conversation_contexts.setdefault(device, {"turns": [], "last_activity": 0.0})
+    if ctx["turns"] and time.time() - ctx["last_activity"] > SHORT_TERM_TTL_SECONDS:
+        print(f"🧹 Short-term memory of '{device}' forgotten after "
+              f"{(time.time() - ctx['last_activity']) / 60:.0f} min of silence")
+        ctx["turns"] = []
+    return ctx
+
+
+def _remember(question: str, answer: str) -> None:
+    """Store an exchange in this device's short-term memory (keeps the last SHORT_TERM_TURNS)."""
+    ctx = _ctx()
+    ctx["turns"] = (ctx["turns"] + [{"question": question, "answer": answer}])[-SHORT_TERM_TURNS:]
+    ctx["last_activity"] = time.time()
 
 
 def clear_device_context(device_id: str) -> None:
     if device_id in _conversation_contexts:
-        _conversation_contexts[device_id]["last_question"] = None
-        _conversation_contexts[device_id]["last_answer"] = None
+        _conversation_contexts[device_id]["turns"] = []
     if device_id in _pending_state:
         _pending_state[device_id].clear()
 
@@ -380,26 +393,6 @@ def clear_device_pending(device_id: str) -> None:
 def device_has_pending(device_id: str) -> bool:
     return device_id in _pending_state and _pending_state[device_id].action is not None
 
-
-def _record_turn(question: str, answer: str) -> None:
-    """Append turn to per-device history; fire summariser every SUMMARIZER_TRIGGER turns."""
-    device = _current_device.get()
-    history = _turn_history.setdefault(device, [])
-    history.append({"question": question, "answer": answer})
-    if len(history) >= SUMMARIZER_TRIGGER:
-        batch = history.copy()
-        _turn_history[device] = []
-        threading.Thread(
-            target=run_summarizer, args=(batch, llm_invoke), daemon=True
-        ).start()
-        print(f"[memory] Summariser triggered after {len(batch)} turns for '{device}'")
-
-
-def get_device_turn_history(device_id: str) -> list[dict]:
-    return list(_turn_history.get(device_id, []))
-
-
-init_router(get_device_turn_history, llm_invoke)
 
 
 # ===================================
@@ -659,26 +652,31 @@ def _normalize_question(text: str | None) -> str:
     return " ".join(re.sub(r"[^\w\s]", "", (text or "").lower()).split())
 
 
+def _shorten(text: str, limit: int = SHORT_TERM_MAX_CHARS) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+
 def _build_conversation_context() -> str:
-    """Build previous exchange string if available.
+    """The recent conversation (short-term memory) for the prompt, oldest first.
 
     A wrong earlier answer must not outvote the user's notes: the small model tends to
     repeat whatever it said before (e.g. "no siblings" even with "brother Isaac" in the
-    context). So the exchange is labelled as possibly wrong, and when the user repeats
-    the same question — usually a sign the answer was wrong — it is left out entirely.
+    context). So the exchanges are labelled as possibly wrong, and when the user repeats
+    a question — usually a sign the answer was wrong — that earlier exchange is left out.
     """
-    if not _ctx()["last_answer"]:
+    turns = _ctx()["turns"]
+    current = _normalize_question(_current_question.get())
+    kept = [t for t in turns if _normalize_question(t["question"]) != current]
+    if len(kept) < len(turns):
+        print("↪️ Same question asked again — its previous answer left out of the prompt")
+    if not kept:
         return ""
-    if _normalize_question(_current_question.get()) == _normalize_question(_ctx()["last_question"]):
-        print("↪️ Same question asked again — previous answer left out of the prompt")
-        return ""
-    last_answer = _ctx()["last_answer"][:200]
-    last_question = _ctx()["last_question"][:100]
+    lines = "\n".join(f"User: {_shorten(t['question'])}\nChatette: {_shorten(t['answer'])}" for t in kept)
     return (
-        f"Previous exchange (only for follow-up questions; it may contain mistakes — "
-        f"if it contradicts the notes or context below, trust the notes and context):\n"
-        f"User: {last_question}\n"
-        f"Chatette: {last_answer}\n\n"
+        "Recent conversation, oldest first (only for follow-up questions; it may contain "
+        "mistakes — if it contradicts the notes or context below, trust the notes and context):\n"
+        f"{lines}\n\n"
     )
 
 
@@ -1711,17 +1709,71 @@ If nothing matches, return NO_MATCH."""
     )
 
 
+# ── Weekday dates — worked out in code ─────────────────────────────────────────────────
+# The model gets weekday maths wrong ("Dinner on Friday", said on a Friday, became last
+# Wednesday). The prompt gets a table of the coming days, and a single weekday in the message
+# ("Friday", "Freitag", "viernes") is resolved here and overrides the model's date.
+
+_WEEKDAYS = {
+    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6,
+    "montag": 0, "dienstag": 1, "mittwoch": 2, "donnerstag": 3, "freitag": 4, "samstag": 5,
+    "sonnabend": 5, "sonntag": 6,
+    "lunes": 0, "martes": 1, "miércoles": 2, "miercoles": 2, "jueves": 3, "viernes": 4,
+    "sábado": 5, "sabado": 5, "domingo": 6,
+}
+_WEEKDAY_RE = re.compile(r"\b(" + "|".join(_WEEKDAYS) + r")s?\b", re.IGNORECASE)
+_EXPLICIT_DATE_RE = re.compile(r"\b\d{1,2}[./-]\d{1,2}\b|\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}(st|nd|rd|th)\b",
+                               re.IGNORECASE)
+
+
+def _has_explicit_date(text: str) -> bool:
+    """A numeric date ("02.11.", "3rd") or a day with a month name ("6 November", "May 3")."""
+    if _EXPLICIT_DATE_RE.search(text):
+        return True
+    months = "|".join(sorted(_MONTH_NUMBERS, key=len, reverse=True))
+    return bool(re.search(rf"\b\d{{1,2}}\.?\s+(of\s+|de\s+)?({months})\b|\b({months})\.?\s+\d{{1,2}}\b",
+                          text, re.IGNORECASE))
+
+
+def _upcoming_days_table(now: datetime, days: int = 14) -> str:
+    rows = [f"- {(now + timedelta(days=i)).strftime('%A %Y-%m-%d')}"
+            + (" (today)" if i == 0 else " (tomorrow)" if i == 1 else "") for i in range(days)]
+    return "Upcoming days (use these dates — never calculate weekdays yourself):\n" + "\n".join(rows)
+
+
+def _resolve_weekday(question: str, start_iso: str | None, now: datetime) -> str | None:
+    """If the message names exactly one weekday and no explicit date, return `start_iso` moved
+    to the next such weekday (today counts if its time hasn't passed yet). Else None."""
+    if not start_iso or _has_explicit_date(question):
+        return None
+    days = {_WEEKDAYS[m.lower()] for m in _WEEKDAY_RE.findall(question)}
+    if len(days) != 1:
+        return None
+    try:
+        start = datetime.fromisoformat(start_iso)
+    except ValueError:
+        return None
+    ahead = (days.pop() - now.weekday()) % 7
+    target = now.date() + timedelta(days=ahead)
+    if ahead == 0 and start.time() <= now.time():
+        target += timedelta(days=7)
+    return start.replace(year=target.year, month=target.month, day=target.day).isoformat()
+
+
 def handle_calendar_event(question: str, extracted: dict, lang: str = "en") -> str:
     """Extract event details and confirm creation."""
-    current_date = datetime.now().strftime("%A, %B %d, %Y")
+    now = datetime.now()
+    current_date = now.strftime("%A, %B %d, %Y")
     previous_context = _build_conversation_context()
 
     extraction_prompt = f"""Today is {current_date}.
+{_upcoming_days_table(now)}
 {previous_context}The user said: "{question}"
 Hint from classifier — title: "{extracted.get('title', '')}", description: "{extracted.get('description', '')}"
 
 Extract calendar event details. Return ONLY a JSON object:
-- title: event name
+- title: the event name in the user's own words and language — leave out the date, the time
+  and the words that introduce them ("am", "um", "on", "at", "el", "a las")
 - start: ISO 8601 datetime
 - end: ISO 8601 datetime (null if not specified)
 - description: extra details (empty if none)
@@ -1743,6 +1795,17 @@ Return ONLY the JSON.
         )
 
     print(f"📅 Extracted event: {event_data}")
+
+    resolved = _resolve_weekday(question, event_data.get("start"), now)
+    if resolved and resolved != event_data.get("start"):
+        print(f"📅 Weekday date fixed in code: {event_data['start']} → {resolved}")
+        if event_data.get("end"):
+            try:   # keep the duration
+                shift = datetime.fromisoformat(resolved) - datetime.fromisoformat(event_data["start"])
+                event_data["end"] = (datetime.fromisoformat(event_data["end"]) + shift).isoformat()
+            except ValueError:
+                event_data["end"] = None
+        event_data["start"] = resolved
 
     try:
         validated = CalendarEventData(
@@ -1815,7 +1878,7 @@ Respond in {_LANG_NAMES.get(lang, 'English')}."""
 # Small models guess badly ("your birthday on August 26th is in 8 months" — it was 10).
 # _date_facts() finds dates in profile/chunk text and states the relative offsets.
 
-_MONTHS = {
+_MONTH_NUMBERS = {
     "january": 1, "jan": 1, "januar": 1, "enero": 1, "february": 2, "feb": 2, "februar": 2, "febrero": 2,
     "march": 3, "mar": 3, "märz": 3, "marzo": 3, "april": 4, "apr": 4, "abril": 4,
     "may": 5, "mai": 5, "mayo": 5, "june": 6, "jun": 6, "juni": 6, "junio": 6,
@@ -1824,7 +1887,7 @@ _MONTHS = {
     "okt": 10, "octubre": 10, "november": 11, "nov": 11, "noviembre": 11,
     "december": 12, "dec": 12, "dezember": 12, "dez": 12, "diciembre": 12,
 }
-_M = "|".join(sorted(_MONTHS, key=len, reverse=True))
+_M = "|".join(sorted(_MONTH_NUMBERS, key=len, reverse=True))
 _DATE_PATTERNS = [
     re.compile(rf"\b(?P<d>\d{{1,2}})(?:st|nd|rd|th)?\.?\s+(?:of\s+|de\s+)?(?P<m>{_M})\b\.?,?\s*(?:de\s+)?(?P<y>\d{{4}})?", re.I),
     re.compile(rf"\b(?P<m>{_M})\.?\s+(?P<d>\d{{1,2}})(?:st|nd|rd|th)?\b,?\s*(?P<y>\d{{4}})?", re.I),
@@ -1855,7 +1918,7 @@ def _date_facts(*texts: str, max_facts: int = 12) -> str:
         for pattern in _DATE_PATTERNS:
             for m in pattern.finditer(text):
                 month = m.group("m")
-                month = int(month) if month.isdigit() else _MONTHS.get(month.lower())
+                month = int(month) if month.isdigit() else _MONTH_NUMBERS.get(month.lower())
                 try:
                     day, year = int(m.group("d")), int(m.group("y")) if m.group("y") else None
                     _date(year or 2000, month, day)       # validate (2000 is a leap year)
@@ -2876,14 +2939,51 @@ def handle_bulbs(question: str, lang: str = "en") -> str:
 RELEVANCE_THRESHOLD = 0.93
 
 
+# ── Answer language = the language of the message ────────────────────────────────────
+# Clients send their UI language as `lang`, but the user may write in another one ("Wie wird
+# das Wetter morgen?" with the app set to English). Every prompt that says "Respond in …" and
+# every fixed reply (_t) uses `lang`, so it is set once here, from the message itself.
+# Only words that are unambiguous between the three languages are used.
+_LANG_WORDS = {
+    "de": {"ich", "du", "wie", "ist", "das", "der", "die", "und", "nicht", "wird", "morgen", "heute",
+           "wetter", "mein", "meine", "meinen", "habe", "hast", "bin", "bist", "wo", "wann", "warum",
+           "welche", "welcher", "gibt", "ein", "eine", "einen", "auf", "mit", "für", "zu", "mir", "mich",
+           "dich", "kannst", "erinnere", "bitte", "heißt", "sind", "haben", "noch", "schon", "ja", "nein"},
+    "es": {"el", "la", "los", "las", "que", "qué", "cómo", "como", "dónde", "donde", "cuándo", "cuando",
+           "mañana", "hoy", "tiempo", "clima", "mi", "mis", "tengo", "soy", "estoy", "está", "una", "para",
+           "por", "con", "y", "del", "puedes", "recuérdame", "cuál", "cual", "quién", "hace", "sí"},
+    "en": {"the", "is", "what", "how", "where", "when", "my", "do", "does", "will", "it", "weather",
+           "tomorrow", "today", "and", "of", "to", "for", "you", "are", "have", "who", "which", "can",
+           "remind", "please", "yes"},
+}
+
+
+def _detect_language(text: str, fallback: str) -> str:
+    """'en', 'de' or 'es' from the message itself; `fallback` (the UI language) when unclear."""
+    words = re.findall(r"[a-zäöüßñáéíóú]+", text.lower())
+    scores = {lang: sum(w in vocab for w in words) for lang, vocab in _LANG_WORDS.items()}
+    if re.search(r"[äöüß]", text.lower()):
+        scores["de"] += 2
+    if re.search(r"[ñ¿¡]", text.lower()):
+        scores["es"] += 2
+    best = max(scores, key=scores.get)
+    ranked = sorted(scores.values(), reverse=True)
+    if ranked[0] == 0 or ranked[0] == ranked[1]:
+        return fallback
+    return best
+
+
 def ask(question: str, mode: str = "auto", lang: str = "en", device_id: str = "app", voice: bool = False) -> str:
+    detected = _detect_language(question, lang)
+    if detected != lang:
+        print(f"🌐 Message language: {detected} (client language was {lang}) — answering in {detected}")
+        lang = detected
     print(f"\nYou: {question} [mode: {mode}] [lang: {lang}] [device: {device_id}] [voice: {voice}]")
     token = _current_device.set(device_id)
     token_v = _current_voice.set(voice or device_id == "s_phone")
     token_q = _current_question.set(question)
     try:
         answer = _ask_internal(question, mode, lang)
-        _record_turn(question, answer)
         return answer
     except RateLimitError:
         print("❌ Groq rate limit reached")
@@ -2949,8 +3049,7 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
     if mode == "control_bulbs":
         answer = handle_bulbs(question, lang)
         print(f"Chatette: {answer}")
-        _ctx()["last_question"] = question
-        _ctx()["last_answer"] = answer
+        _remember(question, answer)
         return answer
 
     # 1. Pending confirmation — check before classification
@@ -2960,8 +3059,7 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
         else:
             answer = handle_confirmation(question, lang)
         print(f"Chatette: {answer}")
-        _ctx()["last_question"] = question
-        _ctx()["last_answer"] = answer
+        _remember(question, answer)
         return answer
 
     # 2. Classify intent
@@ -3009,8 +3107,7 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
             lang
         )
         print(f"Chatette: {answer}")
-        _ctx()["last_question"] = question
-        _ctx()["last_answer"] = answer
+        _remember(question, answer)
         return answer
 
     # 4. Dispatch to handler
@@ -3067,16 +3164,26 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
         answer = _handle_general(question, mode, lang)
 
     print(f"Chatette: {answer}")
-    _ctx()["last_question"] = question
-    _ctx()["last_answer"] = answer
+    _remember(question, answer)
     return answer
+
+
+_ACK_WORDS = {
+    "yes", "yeah", "yep", "no", "nope", "ok", "okay", "sure", "thanks", "thank", "you", "great",
+    "cool", "nice", "perfect", "fine", "good", "alright",
+    "ja", "nein", "danke", "schön", "gut", "super", "klar", "alles", "genau", "prima", "passt",
+    "sí", "si", "gracias", "vale", "perfecto", "bueno", "claro", "genial", "muchas",
+}
+
+
+def _is_acknowledgement(text: str) -> bool:
+    """True for short replies made only of yes/no/thanks words ("Ja", "ok danke", "¡gracias!")."""
+    words = re.findall(r"\w+", text.lower())
+    return 0 < len(words) <= 3 and all(w in _ACK_WORDS for w in words)
 
 
 def _handle_general(question: str, mode: str, lang: str) -> str:
     """Handle general questions via RAG or pure LLM."""
-
-    _memory_block = get_memory_block()
-    _episode_block = retrieve_episodes(question) if is_personal_query(question) else ""
 
     _general_prompt_base = (
         f"{_persona_prompt(lang)}\n\n"
@@ -3084,7 +3191,7 @@ def _handle_general(question: str, mode: str, lang: str) -> str:
         f"Answer the following question in 1-2 sentences.\n"
         f"- Always respond in {_LANG_NAMES.get(lang, 'English')}.\n"
         f"- If the question refers to the previous exchange, use it.\n"
-        f"{_memory_block}{_episode_block}\n\n"
+        f"\n"
         f"Question: {{question}}\n"
         f"Chatette:"
     )
@@ -3101,12 +3208,30 @@ def _handle_general(question: str, mode: str, lang: str) -> str:
         print("Mode: personal/RAG")
         return _rag_query(question, lang=lang)
 
+    if _is_acknowledgement(question):
+        # "Ja", "ok danke"… carry no meaning to search for — their embedding sits vaguely
+        # close to everything, so the cut-off let random emails through. Reply from the
+        # recent conversation only.
+        print("Mode: auto → acknowledgement, no search")
+        return llm_invoke(_general_prompt_base.format(question=question)).strip()
+
     if AUTO_RAG_SELECTOR:
         about_user = _ask_about_user(question)
         print(f"🔎 Auto RAG selector: about_user={about_user}")
         if about_user:
-            print("Mode: auto → about_user=true → personal data (RAG)")
-            return _rag_query(question, lang=lang)
+            # Which sources? Emails/calendar only when the question needs them — otherwise
+            # notes only, so emails and calendar don't crowd the context (tested as variant F:
+            # same accuracy as searching everything, ~73% notes in the context instead of ~51%).
+            if _ask_needs_agenda(question):
+                print("Mode: auto → about_user=true, agenda=true → notes + emails + calendar")
+                return _rag_query(question, lang=lang)
+            print("Mode: auto → about_user=true, agenda=false → notes only")
+            answer = _rag_query(question, scored=_retrieve_scored(question, collections=("notes",)), lang=lang)
+            if _says_not_found(answer):
+                # Fallback: the agenda call can miss (e.g. "which company sent me a notice…")
+                print("↪️ Not found in notes → searching all sources")
+                answer = _rag_query(question, lang=lang)
+            return answer
         # about_user=false: fall through to the relevance cut-off below (as in plain auto mode)
 
     scored = _retrieve_scored(question)
@@ -3117,16 +3242,123 @@ def _handle_general(question: str, mode: str, lang: str) -> str:
         print("Using general knowledge...")
         return llm_invoke(_general_prompt_base.format(question=question)).strip()
 
-    return _rag_query(question, scored=scored, lang=lang)
+    answer = _rag_query(question, scored=scored, lang=lang)
+    if _says_not_found(answer):
+        # The cut-off only says *something* in the personal data looked similar. If the answer
+        # isn't there, it was probably a general question ("In which city were the 2024 Olympics
+        # held?" → "I don't have that in my notes") — answer it from general knowledge instead.
+        print("↪️ Not found in personal data → general knowledge")
+        # Guard: the question may still be personal (the yes/no call can miss, e.g. "What does
+        # Ines do for a living?") — general knowledge must never invent personal details.
+        guarded = _general_prompt_base.replace(
+            "Question:",
+            f"- Answer general/world-knowledge questions normally. But if the question is about "
+            f"{USER_NAME} or people in his life (family, partner, friends) and you don't know the "
+            f"answer, say you don't have that information — never invent personal details.\n\nQuestion:", 1)
+        return llm_invoke(guarded.format(question=question)).strip()
+    return answer
+
+
+_NOT_FOUND = re.compile(
+    r"don'?t (have|know|see|find)|do not (have|know|see|find)|no (information|record|details|mention)|"
+    r"not (in|mentioned in) (my|your) notes|couldn'?t find|can'?t find|isn'?t (in|mentioned)|"
+    r"keine informationen|habe ich nicht|nicht in (meinen|deinen) notizen|"
+    r"no tengo|no encuentro|no aparece|no est[aá] en (mis|tus) notas",
+    re.IGNORECASE)
+
+
+def _says_not_found(answer: str) -> bool:
+    """True when an answer says the information isn't in the personal data."""
+    return bool(_NOT_FOUND.search(answer or ""))
+
+
+_AGENDA_PROMPT = """Answer about this question from {user} to his personal assistant.
+Does answering it need information from his EMAILS or CALENDAR — appointments, meetings,
+interviews, invitations, scheduled events, messages or letters he received?
+Things from his own life that are not scheduled or sent to him (facts about himself, his family,
+his history, his health, past trips, routines) do NOT count.
+
+Question: "{q}"
+Reply with only: yes or no"""
+
+
+def _ask_needs_agenda(question: str) -> bool:
+    """Second small call of the auto RAG selector: does the answer live in emails/calendar?"""
+    try:
+        reply = llm_invoke(_AGENDA_PROMPT.format(user=USER_NAME, q=question)).strip().lower()
+        return reply.startswith("yes")
+    except RateLimitError:
+        raise
+    except Exception as e:
+        print(f"⚠️ agenda call failed ({e}) — searching all sources")
+        return True
 
 
 RAG_COLLECTIONS = ("calendar", "emails", "notes", "lists", "documents")
 MAX_CONTEXT_CHARS = 2400
 
 
+# Cross-language search: the notes are mostly English, and a German or Spanish question
+# matches German/Spanish emails and calendar entries far better than English notes
+# ("Wo habe ich diesen Sommer meinen Urlaub verbracht?" ranked the English vacation note
+# #12 and dropped it). Non-English questions are therefore also searched in English.
+_NON_ENGLISH_HINT = re.compile(
+    r"[äöüßñ¿¡]|\b(ich|du|mein|meine|meinen|habe|hast|bin|bist|wo|wann|wie|warum|welche|"
+    r"und|nicht|eine?|yo|mis?|tengo|soy|estoy|d[oó]nde|cu[aá]ndo|qu[eé]|c[oó]mo|los|las|por)\b",
+    re.IGNORECASE)
+_translation_cache: dict[str, str] = {}
+
+
+def _search_queries(question: str) -> list[str]:
+    """The question itself, plus an English translation when it looks non-English."""
+    if len(_NON_ENGLISH_HINT.findall(question)) < 2 and not re.search(r"[äöüßñ¿¡]", question):
+        return [question]
+    if question not in _translation_cache:
+        try:
+            english = llm_invoke(
+                "Translate this question into English. Keep names as they are. "
+                f"Reply with only the translation.\n\n{question}").strip().strip('"')
+        except Exception as e:
+            print(f"⚠️ Search translation failed ({e}) — searching with the original only")
+            english = ""
+        _translation_cache[question] = english
+        if len(_translation_cache) > 200:
+            _translation_cache.pop(next(iter(_translation_cache)))
+    english = _translation_cache[question]
+    if english and english.lower() != question.lower():
+        print(f"🌐 Also searching in English: {english!r}")
+        return [question, english]
+    return [question]
+
+
 def _retrieve_scored(question: str, collections=RAG_COLLECTIONS,
                      k_emails: int = 7, k_other: int = 5) -> list[tuple]:
-    """Top-k (doc, distance) pairs from each collection. Lower distance = more relevant."""
+    """Top-k (doc, distance) pairs from each collection, for the question and (if it is not
+    English) its English translation. Returned best-first; each chunk keeps its best distance
+    (lower = more relevant) for logging and the relevance cut-off.
+
+    With two queries, the order comes from reciprocal rank fusion (rank-based merging):
+    distances from different queries aren't comparable — a German question scores German
+    emails higher than its English translation scores the English notes, so sorting by
+    distance let German emails crowd out the notes ("Wie heißt mein Bruder?").
+    """
+    queries = _search_queries(question)
+    best: dict[str, tuple] = {}
+    fused: dict[str, float] = {}
+    for query in queries:
+        ranked = sorted(_search_once(query, collections, k_emails, k_other), key=lambda p: p[1])
+        for rank, (doc, score) in enumerate(ranked):
+            key = doc.page_content.strip()
+            if key not in best or score < best[key][1]:
+                best[key] = (doc, score)
+            fused[key] = fused.get(key, 0.0) + 1.0 / (60 + rank)
+    if len(queries) == 1:
+        return sorted(best.values(), key=lambda p: p[1])
+    return [best[k] for k in sorted(fused, key=fused.get, reverse=True)]
+
+
+def _search_once(question: str, collections, k_emails: int, k_other: int) -> list[tuple]:
+    """Top-k (doc, distance) pairs from each collection for one query string."""
     scored = []
     for collection in collections:
         k = k_emails if collection == "emails" else k_other
@@ -3148,14 +3380,13 @@ def _retrieve_scored(question: str, collections=RAG_COLLECTIONS,
 
 
 def _select_chunks(scored: list[tuple], max_chars: int = MAX_CONTEXT_CHARS) -> tuple[list, list]:
-    """Pool chunks from all collections, best (lowest distance) first, drop exact
-    duplicates, and fill the context budget best-first.
+    """Take chunks in the given best-first order (as returned by _retrieve_scored), drop
+    exact duplicates, and fill the context budget best-first.
 
     Returns (selected_docs, rows) where rows describe every candidate for the log.
     """
-    ranked = sorted(scored, key=lambda pair: pair[1])
     selected, rows, seen, used = [], [], set(), 0
-    for doc, score in ranked:
+    for doc, score in scored:
         text = doc.page_content.strip()
         if text in seen:
             rows.append((doc, score, "DUPLICATE (skipped)"))
@@ -3200,16 +3431,13 @@ def _rag_query(question: str, scored: list[tuple] | None = None, lang: str = "en
     tomorrow = (now + timedelta(days=1)).strftime("%A, %B %d, %Y")
     day_after = (now + timedelta(days=2)).strftime("%A, %B %d, %Y")
 
-    memory_block = get_memory_block()
-    episode_block = retrieve_episodes(question) if is_personal_query(question) else ""
-
     date_facts = _date_facts(USER_PROFILE or "", context)
 
     context = f"""Today is: {current_date}
 Tomorrow is: {tomorrow}
 The day after tomorrow is: {day_after}
 {date_facts}
-{_build_conversation_context()}{context}{memory_block}{episode_block}"""
+{_build_conversation_context()}{context}"""
 
     formatted_prompt = prompt_template.format(
         context=context, question=question,

@@ -25,7 +25,7 @@ from google_integration import get_upcoming_events, get_recent_emails
 
 CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH")
 DOCUMENTS_PATH = os.getenv("DOCUMENTS_PATH")
-NOTES_PATH = os.getenv("NOTES_PATH")
+DOCS_PATH = os.getenv("DOCS_PATH")
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL")
@@ -230,6 +230,29 @@ def _file_chunks(path: Path, collection: str) -> list[Document]:
     return [c for c in chunks if _apply_chunk_metadata(c, collection, path.name)]
 
 
+def _personal_note_chunks(path: Path) -> list[Document]:
+    """personal_notes.txt: one chunk per note, header included (it tells Chatette when the note
+    was written, or that it is a lasting fact). A note longer than CHUNK_SIZE is split, and every
+    piece repeats the header."""
+    from note_manager import parse_personal_notes, note_header
+
+    if not path.exists() or not path.read_text(encoding="utf-8").strip():
+        return []
+    preamble, notes = parse_personal_notes(path.read_text(encoding="utf-8"))
+    chunks = []
+    if preamble:                     # old-format text without headers, if any is left
+        chunks += text_splitter.split_documents([Document(page_content=preamble, metadata={})])
+    for note in notes:
+        header = note_header(note["created"], note["timeless"])
+        room = max(CHUNK_SIZE - len(header) - 1, 100)
+        parts = RecursiveCharacterTextSplitter(
+            chunk_size=room, chunk_overlap=min(CHUNK_OVERLAP, room // 4)
+        ).split_text(note["text"]) or [""]
+        for part in parts:
+            chunks.append(Document(page_content=f"{header} {part}".strip(), metadata={}))
+    return [c for c in chunks if _apply_chunk_metadata(c, "notes", path.name)]
+
+
 def ingest_file(filepath: str, collection: str = "documents"):
     """Ingest (or re-sync) a single file into the vector store."""
     path = Path(filepath)
@@ -262,15 +285,20 @@ def ingest_all_documents():
 # ==========================
 def ingest_notes():
     """Sync all notes (reminders, personal notes, drafts)."""
-    notes_path = Path(NOTES_PATH)
+    notes_path = Path(DOCS_PATH)
     if not notes_path.exists():
-        print("Notes folder not found.")
+        print("Docs folder not found.")
         return
 
     chunks = []
     for file in notes_path.iterdir():
         if file.is_file() and file.suffix in ('.txt', '.md'):
-            chunks += _file_chunks(file, "notes")
+            if file.name.startswith("journal_offline_edit_"):
+                continue   # sync conflict backups — kept for the user to review, not knowledge
+            if file.name == "personal_notes.txt":
+                chunks += _personal_note_chunks(file)
+            else:
+                chunks += _file_chunks(file, "notes")
 
     drafts_path = notes_path / "drafts"
     if drafts_path.exists():
@@ -286,7 +314,7 @@ def ingest_notes():
 # ==========================
 def ingest_lists():
     """Sync all list files."""
-    lists_path = Path(NOTES_PATH) / "lists"
+    lists_path = Path(DOCS_PATH) / "lists"
     if not lists_path.exists():
         print("Lists folder not found — skipping.")
         return

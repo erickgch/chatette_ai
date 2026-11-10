@@ -1,6 +1,6 @@
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TypedDict
 from dotenv import load_dotenv
 from pathlib import Path
@@ -8,16 +8,16 @@ from pydantic import BaseModel, field_validator, ValidationError
 
 load_dotenv()
 
-NOTES_PATH = os.getenv("NOTES_PATH")
-REMINDERS_FILE = os.path.join(NOTES_PATH, "reminders.txt")
-PERSONAL_NOTES_FILE = os.path.join(NOTES_PATH, "personal_notes.txt")
-DRAFTS_PATH = os.path.join(NOTES_PATH, "drafts")
-LISTS_PATH = os.path.join(NOTES_PATH, "lists")
+DOCS_PATH = os.getenv("DOCS_PATH")
+REMINDERS_FILE = os.path.join(DOCS_PATH, "reminders.txt")
+PERSONAL_NOTES_FILE = os.path.join(DOCS_PATH, "personal_notes.txt")
+DRAFTS_PATH = os.path.join(DOCS_PATH, "drafts")
+LISTS_PATH = os.path.join(DOCS_PATH, "lists")
 
 
 def _ensure_files_exist():
     """Create default files and folders if they don't exist."""
-    Path(NOTES_PATH).mkdir(parents=True, exist_ok=True)
+    Path(DOCS_PATH).mkdir(parents=True, exist_ok=True)
     Path(DRAFTS_PATH).mkdir(parents=True, exist_ok=True)
     Path(LISTS_PATH).mkdir(parents=True, exist_ok=True)
     if not os.path.exists(REMINDERS_FILE):
@@ -209,20 +209,115 @@ def get_reminders_list() -> list[ReminderItem]:
 # Personal Notes
 # ==========================
 
+# ==========================
+# Personal notes: one note per header
+# ==========================
+# Every note starts with a header that is set once, at creation, and never changes — it is
+# the note's identity:
+#   [2026-06-03 14:37] I want to go back to teaching Spanish…        (timestamped note)
+#   [timeless · created 2026-10-30 14:05] I am left-handed.          (lasting fact)
+# A note's text runs until the next header and may span several lines. Each note is one
+# chunk in the search index, header included.
+
+NOTE_HEADER_RE = re.compile(
+    r"^\[(?:(timeless)\s*[·\-]\s*created\s+)?(\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?::\d{2})?)\][ \t]*",
+    re.MULTILINE | re.IGNORECASE)
+
+
+def note_header(created: str, timeless: bool) -> str:
+    return f"[timeless · created {created}]" if timeless else f"[{created}]"
+
+
+def parse_personal_notes(content: str) -> tuple[str, list[dict]]:
+    """Split the notes file into (preamble, notes). The preamble is any text before the first
+    header (old-format content); notes are dicts: id, created, timeless, text."""
+    matches = list(NOTE_HEADER_RE.finditer(content))
+    preamble = content[:matches[0].start()].strip() if matches else content.strip()
+    notes = []
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(content)
+        notes.append({
+            "id": m.group(2),                    # creation time = identity
+            "created": m.group(2),
+            "timeless": bool(m.group(1)),
+            "text": content[m.end():end].strip(),
+        })
+    return preamble, notes
+
+
+def serialize_personal_notes(preamble: str, notes: list[dict]) -> str:
+    parts = [preamble.strip()] if preamble.strip() else []
+    parts += [f"{note_header(n['created'], n['timeless'])} {n['text'].strip()}" for n in notes]
+    return "\n\n".join(parts) + "\n"
+
+
+def _read_personal_notes() -> tuple[str, list[dict]]:
+    if not os.path.exists(PERSONAL_NOTES_FILE):
+        return "", []
+    with open(PERSONAL_NOTES_FILE, "r", encoding="utf-8") as f:
+        return parse_personal_notes(f.read())
+
+
+def _write_personal_notes(preamble: str, notes: list[dict]) -> None:
+    with open(PERSONAL_NOTES_FILE, "w", encoding="utf-8") as f:
+        f.write(serialize_personal_notes(preamble, notes))
+
+
+def list_personal_notes() -> list[dict]:
+    """All notes, in file order (oldest first)."""
+    return _read_personal_notes()[1]
+
+
+def add_personal_note(text: str, timestamped: bool = True) -> dict | None:
+    """Append a note. Its header (creation time, and 'timeless' if not timestamped) is fixed."""
+    text = text.strip()
+    if not text:
+        return None
+    preamble, notes = _read_personal_notes()
+    taken = {n["id"] for n in notes}
+    now = datetime.now().replace(microsecond=0)
+    created = now.strftime("%Y-%m-%d %H:%M")
+    if created in taken:                         # same minute → add seconds, step until unique
+        while now.strftime("%Y-%m-%d %H:%M:%S") in taken:
+            now += timedelta(seconds=1)
+        created = now.strftime("%Y-%m-%d %H:%M:%S")
+    note = {"id": created, "created": created, "timeless": not timestamped, "text": text}
+    notes.append(note)
+    _write_personal_notes(preamble, notes)
+    print(f"✅ Personal note added: {note_header(created, note['timeless'])} {text[:60]}")
+    return note
+
+
+def edit_personal_note(note_id: str, text: str) -> bool:
+    """Change a note's text. Its header (identity, timestamp, timeless status) stays as is."""
+    preamble, notes = _read_personal_notes()
+    for n in notes:
+        if n["id"] == note_id:
+            n["text"] = text.strip()
+            _write_personal_notes(preamble, notes)
+            print(f"✅ Personal note edited: {note_id}")
+            return True
+    return False
+
+
+def delete_personal_note(note_id: str) -> bool:
+    preamble, notes = _read_personal_notes()
+    kept = [n for n in notes if n["id"] != note_id]
+    if len(kept) == len(notes):
+        return False
+    _write_personal_notes(preamble, kept)
+    print(f"🗑️ Personal note deleted: {note_id}")
+    return True
+
+
 def save_personal_note(text: str) -> None:
-    """Validate and append a note to personal_notes.txt."""
+    """Validate and add a note to personal_notes.txt (notes added via chat are timestamped)."""
     try:
-        item = PersonalNoteItem(
-            text=text,
-            created_at=datetime.now().strftime("%Y-%m-%d %H:%M")
-        )
+        item = PersonalNoteItem(text=text)
     except ValidationError as e:
         print(f"⚠️ Invalid personal note — skipping: {e}")
         return
-
-    with open(PERSONAL_NOTES_FILE, "a", encoding="utf-8") as f:
-        f.write(f"[{item.created_at}] {item.text}\n")
-    print(f"✅ Personal note saved: {item.text}")
+    add_personal_note(item.text, timestamped=True)
 
 
 def get_all_personal_notes() -> str:
