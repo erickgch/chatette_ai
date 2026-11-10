@@ -4,7 +4,7 @@ import concurrent.futures
 from tapo import ApiClient  # type: ignore[import-untyped]
 
 
-# ── Named colour map (hue, saturation) ───────────────────────────────────────
+# ── Named color map (hue, saturation) ────────────────────────────────────────
 COLOR_MAP: dict[str, tuple[int, int]] = {
     "red":     (0,   100),
     "orange":  (30,  100),
@@ -19,7 +19,7 @@ COLOR_MAP: dict[str, tuple[int, int]] = {
     "magenta": (300, 100),
 }
 
-# ── Named colour-temperature map (Kelvin) ─────────────────────────────────────
+# ── Named color-temperature map (Kelvin) ──────────────────────────────────────
 COLOR_TEMP_MAP: dict[str, int] = {
     "warm":     2700,
     "candle":   2500,

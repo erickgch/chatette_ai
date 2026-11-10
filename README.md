@@ -378,7 +378,7 @@ chatette_ai/
 
 ## Chat Modes
 
-| Mode | Behaviour |
+| Mode | Behavior |
 |---|---|
 | **Auto** | Chatette decides whether to search personal data or answer from general knowledge |
 | **Personal** | Always searches your documents, calendar, emails and notes first |

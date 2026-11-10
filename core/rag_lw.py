@@ -345,7 +345,7 @@ _pending_state: dict[str, "PendingState"] = {}
 # Per device, the last SHORT_TERM_TURNS exchanges (question + answer), so follow-up
 # questions work ("do I have a brother?" → "where does he live?"). Kept in memory only:
 # forgotten after SHORT_TERM_TTL_SECONDS of silence on that device, and on restart.
-# (Replaces the former 20-turn summariser, which never triggered in practice and pasted
+# (Replaces the former 20-turn summarizer, which never triggered in practice and pasted
 # unchecked "learned facts" — one of them wrong — into every prompt.)
 SHORT_TERM_TURNS = 3
 SHORT_TERM_TTL_SECONDS = 3600
@@ -695,7 +695,7 @@ def _persona_prompt(lang: str = "en") -> str:
 # ===================================
 
 def _normalise_items(extracted: dict, key: str = "items", fallback_key: str = "text") -> list:
-    """Normalise extracted data to always return a list of strings."""
+    """Normalize extracted data to always return a list of strings."""
     items = extracted.get(key)
     if items and isinstance(items, list):
         return [str(i).strip() for i in items if str(i).strip()]
@@ -1175,7 +1175,7 @@ def _analyze_draft_request(request: str, previous_context: str, lang: str) -> di
 The user asked their personal assistant for a draft:
 \"\"\"{request}\"\"\"
 
-Analyse the request. Return ONLY a JSON object with:
+Analyze the request. Return ONLY a JSON object with:
 - "type": the kind of document (e.g. "email", "letter", "message", "plan", "document")
 - "title": a short title for it, at most 6 words
 - "summary": 1-2 sentences in {_LANG_NAMES.get(lang, "English")}, speaking to the user as "you", restating what they want with every concrete detail and constraint they gave (who, where, when, numbers, restrictions, tone). Do not add anything they did not say.
@@ -2070,7 +2070,7 @@ The user asked: "{question}"
 Answer the question asked; only list events that are relevant to it.
 If the question is not about these events at all, answer it without mentioning them.
 Be friendly and natural. Respond in {_LANG_NAMES.get(lang, 'English')}.
-Keep it concise — 1 to 4 events max, summarise the rest if there are more."""
+Keep it concise — 1 to 4 events max, summarize the rest if there are more."""
 
     return llm_invoke(format_prompt).strip()
 
