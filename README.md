@@ -1,6 +1,4 @@
-# 🐱 Chatette — Personal AI Assistant & Smart Home Manager
-
-**Version 0.3**
+# 🐱 Chatette — Personal AI Assistant & Smart Home Manager (v0.3)
 
 Chatette is a DIY-spirited, privacy-focused personal AI assistant that runs on your own hardware.
 Built for people who want the power of a smart assistant without giving up their privacy or
@@ -8,7 +6,7 @@ paying a subscription. Chatette runs on your machine, speaks your language, cont
 and works for you — not for an ad platform.
 
 The backend runs on your PC and exposes an API protected by a secret key. A companion Android
-app, a web app and a voice phone connect to it over your home network, or from anywhere via
+app, a web app and a retro phone connect to it over your home network, or from anywhere via
 Tailscale. Since version 0.3 the language model runs entirely on your own PC — your notes,
 reminders, lists, documents and questions never leave your network.
 
@@ -21,7 +19,7 @@ reminders, lists, documents and questions never leave your network.
 **Reminders**
 Tell Chatette to remember anything — errands, ideas, appointments. She saves them locally,
 reads them back, manages conflicts and removes them on request. Several reminders can be saved
-in one message. Notifications fire daily at 9:00, 12:00 and 18:00.
+in one message. Notifications fire three times per day (default: at 9:00, 12:00 and 18:00).
 
 **Lists**
 Create and manage checkbox lists — shopping lists, packing lists, to-do lists.
@@ -39,7 +37,7 @@ Ask for your agenda and Chatette combines reminders and upcoming calendar events
 concise briefing in one LLM call.
 
 **Gmail**
-Ask Chatette to summarise recent emails. She searches the RAG index first and falls back to
+Ask Chatette to summarize recent emails. She searches the RAG index first and falls back to
 a live Gmail API call if needed.
 
 **Draft Creation**
@@ -48,7 +46,7 @@ saves it to your docs folder, always in the language you asked in.
 
 **Personal Notes / Journal**
 Save personal information, thoughts or anything you want Chatette to remember about you.
-She uses these to give more personalised responses.
+She uses these to give more personalized responses.
 
 **Short-term Memory**
 Chatette remembers the last 3 exchanges per device, so follow-up questions ("and tomorrow?")
@@ -56,8 +54,7 @@ work. The conversation is forgotten after an hour of silence and on restart.
 
 **Weather**
 Ask about the weather now, today, tomorrow, the next few days or the whole week. Chatette
-describes temperatures by time of day (morning / daytime / evening) and wind qualitatively
-(calm, light breeze, strong wind) — never raw km/h figures.
+tells you the weather in a clear and concise way.
 
 **Nearby Places**
 Ask for a restaurant, café, pharmacy, supermarket and more near your home. Chatette searches
@@ -72,34 +69,6 @@ like any AI assistant, but running on your own terms.
 
 ---
 
-### Smart Home
-
-**Lights — TP-Link Tapo L530 Smart Bulb**
-Control the living-room bulb from the app or via voice/chat:
-- Turn on / off
-- Set brightness (1–100%)
-- Set colour temperature (warm white 2500 K → cool white 6500 K)
-- Set colour (full hue wheel)
-
-**TV — Chromecast + YouTube**
-Cast content to your TV from the app or by chat:
-- Open named channels (ZDF, ARD, Euronews, Arte FR/DE, Milenio, TV5 Monde, NHK World)
-- Search YouTube and cast directly to the TV
-- Power on / off, volume, stop, resume via control bar
-
-**Voice Phone — Raspberry Pi Zero 2 W**
-A Raspberry Pi Zero 2 W built into a classic telephone acts as a stationary voice phone
-anywhere in the home. Keypad shortcuts trigger intents directly (weather, agenda, emails,
-lights, timer, alarm) without needing to speak a command. Chatette responds in the selected
-language via Piper TTS streamed to the phone's speaker.
-
-**Wake-on-LAN**
-The Pi also acts as a wake relay: when the PC is asleep or off, the apps ask the Pi to send a
-magic packet and the backend wakes up. The relay accepts only requests that carry the
-secret key.
-
----
-
 ### Voice
 
 Speak to Chatette using your microphone. She transcribes with Whisper, responds via the LLM,
@@ -110,6 +79,35 @@ Spanish (es_AR-daniela-high).
 
 Select your language with the flag buttons in the app before pressing the mic.
 Chatette always responds in the language you speak or write in.
+
+---
+
+### Smart Home
+
+**Lights — TP-Link Tapo L530 Smart Bulb**
+Control the living-room bulb from the app or via voice/chat:
+- Turn on / off
+- Set brightness
+- Set color temperature (white light)
+- Set color (full hue wheel)
+
+**TV — Chromecast + YouTube**
+Cast content to your TV from the app or by chat:
+- Open named channels (ZDF, ARD, Euronews, Arte FR/DE, Milenio, TV5 Monde, NHK World)
+- Search YouTube and cast directly to the TV
+- Power on / off, volume, stop, resume via control bar
+
+**Retro Phone — Raspberry Pi Zero 2 W**
+A Raspberry Pi Zero 2 W powers an old stationary phone, turning it into a Chatette hotline.
+Hardware buttons trigger intents directly (weather, agenda, emails, lights, timer, alarm)
+without needing to speak a command. Chatette responds in the selected language via
+Piper TTS streamed to the Pi's audio output.
+* See 'Chatette Hotline' project for more information.
+
+**Wake-on-LAN**
+The Pi also acts as a wake relay: when the PC is asleep or off, the apps ask the Pi to send a
+magic packet and the backend wakes up. The relay accepts only requests that carry the
+secret key.
 
 ---
 
@@ -127,7 +125,7 @@ screens, labels, shortcuts, notifications and confirmation messages.
 | Windows PC (NVIDIA GPU) | Backend server (FastAPI, LLM, RAG, TTS, STT) |
 | Android phone | Primary companion app (Flutter) |
 | Any browser | Web app (chat, lists, notes, lights, TV) |
-| Raspberry Pi Zero 2 W | Stationary voice phone (keypad + speaker) and Wake-on-LAN relay |
+| Raspberry Pi Zero 2 W | Retro phone (Chatette Hotline) and Wake-on-LAN relay |
 | TP-Link Tapo L530 | Smart RGB bulb (lights control) |
 | Google Chromecast | TV casting target |
 
@@ -137,7 +135,7 @@ screens, labels, shortcuts, notifications and confirmation messages.
 
 ```
 Android App (Flutter)     Web App (browser)     Raspberry Pi Zero 2 W
-        │                        │               (voice phone + wake relay)
+        │                        │               (retro phone + wake relay)
         │   home network or Tailscale — every request carries the API key
         └────────────────────────┼───────────────────────┘
                                  ▼
@@ -407,7 +405,7 @@ Chatette classifies every message into one of these intents before responding:
 | `view_events` | Shows upcoming calendar events |
 | `delete_event` | Removes a calendar event |
 | `view_agenda` | Combined reminders + events overview in one call |
-| `view_emails` | Summarises recent emails (RAG first, live fallback) |
+| `view_emails` | Summarizes recent emails (RAG first, live fallback) |
 | `get_weather` | Now / today / tomorrow / next days / weekly forecast |
 | `find_places` | Finds nearby restaurants, cafés, shops and more |
 | `create_list` | Creates a new checkbox list |
@@ -416,7 +414,7 @@ Chatette classifies every message into one of these intents before responding:
 | `delete_list` | Deletes a list |
 | `save_personal_note` | Saves a personal note or journal entry |
 | `create_draft` | Generates and saves a written draft |
-| `control_bulbs` | Controls the lights via chat (on / off, brightness, colour) |
+| `control_bulbs` | Controls the lights via chat (on / off, brightness, color) |
 | `set_alarm` | Sets a countdown timer or an alarm at a set time |
 | `cast_youtube` | Searches YouTube and plays the result on the TV |
 | `cast_channel` | Opens a live TV channel |
