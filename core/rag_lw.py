@@ -661,7 +661,7 @@ def _build_conversation_context() -> str:
     """The recent conversation (short-term memory) for the prompt, oldest first.
 
     A wrong earlier answer must not outvote the user's notes: the small model tends to
-    repeat whatever it said before (e.g. "no siblings" even with "brother Isaac" in the
+    repeat whatever it said before (e.g. "no siblings" even with "brother Tom" in the
     context). So the exchanges are labelled as possibly wrong, and when the user repeats
     a question — usually a sign the answer was wrong — that earlier exchange is left out.
     """
@@ -1875,7 +1875,7 @@ Respond in {_LANG_NAMES.get(lang, 'English')}."""
 # ===================================
 # DATE FACTS — date maths done in code, handed to the LLM
 # ===================================
-# Small models guess badly ("your birthday on August 26th is in 8 months" — it was 10).
+# Small models guess badly ("your birthday on March 3rd is in 8 months" — it was 10).
 # _date_facts() finds dates in profile/chunk text and states the relative offsets.
 
 _MONTH_NUMBERS = {
@@ -1931,7 +1931,7 @@ def _date_facts(*texts: str, max_facts: int = 12) -> str:
                 is_birth = bool(_BIRTH_WORDS.search(text[max(0, m.start() - 40):m.start()]))
                 if year is None and not is_birth:
                     # No year given: a recent date most likely meant this year
-                    # ("the marathon is on the 4th of October", written in September).
+                    # ("the concert is on the 4th of October", written in September).
                     try:
                         this_year = _date(today.year, month, day)
                     except ValueError:
@@ -2340,7 +2340,7 @@ Keep it to 2-4 natural sentences. No bullet points or dashes.
 If no important emails were found, say so in one friendly sentence.
 Respond in {_LANG_NAMES.get(lang, 'English')}.
 
-Example good response: "You got a couple of things worth noting — Ines sent you a message about weekend plans, and Dr. Müller's office confirmed your dental appointment for Thursday at 10."
+Example good response: "You got a couple of things worth noting — Anna sent you a message about weekend plans, and Dr. Müller's office confirmed your dental appointment for Thursday at 10."
 Example bad response (do NOT do this): "- From: LinkedIn | 5 new job suggestions. - From: Amazon | Today's deals." """
     else:
         format_instructions = f"""Summarize the emails below. Always mention emails about: purchases or orders, appointments or reservations, personal messages from real people, contracts or legal notices, job interviews or work offers, travel (flights, hotels, bookings). Skip newsletters, promotions, automated notifications, and social media alerts unless nothing else is present.
@@ -2352,7 +2352,7 @@ Respond in {_LANG_NAMES.get(lang, 'English')}.
 Examples:
 - From: Amazon | Order #123 shipped — your headphones are on the way, arriving Friday.
 - From: Dr. Müller's office | Appointment confirmation — dental check-up Thursday at 10am.
-- From: Ines | Weekend plans — she's asking if you're free Saturday.
+- From: Anna | Weekend plans — she's asking if you're free Saturday.
 - From: Lufthansa | Your flight to Lisbon — booking confirmed, departs Oct 12 at 7:15am."""
 
     format_prompt = f"""{_persona_prompt(lang)}
@@ -3249,7 +3249,7 @@ def _handle_general(question: str, mode: str, lang: str) -> str:
         # held?" → "I don't have that in my notes") — answer it from general knowledge instead.
         print("↪️ Not found in personal data → general knowledge")
         # Guard: the question may still be personal (the yes/no call can miss, e.g. "What does
-        # Ines do for a living?") — general knowledge must never invent personal details.
+        # my partner do for a living?") — general knowledge must never invent personal details.
         guarded = _general_prompt_base.replace(
             "Question:",
             f"- Answer general/world-knowledge questions normally. But if the question is about "

@@ -123,4 +123,4 @@ def _get_local_ip() -> str:
         s.close()
         return ip
     except Exception:
-        return "192.168.0.4"
+        return "127.0.0.1"

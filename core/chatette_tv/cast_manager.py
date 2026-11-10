@@ -2,7 +2,7 @@
 cast_manager.py — pychromecast singleton for Chatette TV.
 
 Fully compatible with pychromecast v14.
-Uses static IP 192.168.0.7 for reliable connection.
+Connects to the static IP in CHROMECAST_IP (.env) for a reliable connection.
 
 Features:
   - Power on/off via Backdrop (HDMI-CEC)
@@ -13,6 +13,7 @@ Features:
   - Debug logging
 """
 
+import os
 import socket
 import threading
 
@@ -21,7 +22,13 @@ _cast = None
 _yt_controller = None
 _last_cast = None  # {'type': 'hls', 'url': str, 'title': str} | {'type': 'youtube', 'video_id': str}
 
-_CHROMECAST_IP = "192.168.0.7"
+def _chromecast_ip() -> str:
+    """The Chromecast's IP from .env (read when used — .env may load after this import)."""
+    ip = os.getenv("CHROMECAST_IP", "").strip()
+    if not ip:
+        raise RuntimeError("CHROMECAST_IP is not set in .env")
+    return ip
+
 _WAKEUP_APP_ID = "CC1AD845"   # Default Media Receiver — triggers CEC Active Source
 
 try:
@@ -38,11 +45,11 @@ def _connect_via_castinfo():
     try:
         from pychromecast.models import CastInfo, HostServiceInfo
         cast_info = CastInfo(
-            services=frozenset([HostServiceInfo(host=_CHROMECAST_IP, port=8009)]),
+            services=frozenset([HostServiceInfo(host=_chromecast_ip(), port=8009)]),
             uuid=None,
             model_name="Chromecast",
             friendly_name="Chromecast",
-            host=_CHROMECAST_IP,
+            host=_chromecast_ip(),
             port=8009,
             cast_type="cast",
             manufacturer="Google Inc.",
@@ -72,9 +79,9 @@ def _connect():
             print("[CastManager] pychromecast not installed.")
             return None
 
-        print(f"[CastManager] Connecting to Chromecast at {_CHROMECAST_IP} ...")
+        print(f"[CastManager] Connecting to Chromecast at {_chromecast_ip()} ...")
         try:
-            with socket.create_connection((_CHROMECAST_IP, 8009), timeout=5):
+            with socket.create_connection((_chromecast_ip(), 8009), timeout=5):
                 pass
         except Exception as sock_err:
             print(f"[CastManager] Port 8009 NOT reachable: {sock_err}")

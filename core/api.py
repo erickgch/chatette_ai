@@ -428,7 +428,7 @@ def command(request: CommandRequest, http: Request, x_device: str = Header(None,
             answer = handle_personal_note(question, extracted, lang)
 
         elif cmd == "weather":
-            # Free-form payload, e.g. "for the next 3 days in Cologne" → city + timeframe
+            # Free-form payload, e.g. "for the next 3 days in Hamburg" → city + timeframe
             from weather import parse_weather_request
             city, timeframe = parse_weather_request(payload)
             extracted = {"city": city, "timeframe": timeframe}

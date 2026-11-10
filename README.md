@@ -362,8 +362,7 @@ chatette_ai/
 │   ├── chat.py               ← Terminal chat (test/debug)
 │   └── voice.py              ← Whisper STT + Piper TTS
 ├── tools/
-│   ├── firewall_chatette.ps1     ← Limits port 8000 to home network + Tailscale
-│   └── migrate_personal_notes.py ← One-off migration of the personal notes format
+│   └── firewall_chatette.ps1     ← Limits port 8000 to home network + Tailscale
 ├── piper/                    ← Piper executable + voice model files (not in git)
 ├── data/                     ← User data — docs, ChromaDB, cache (not in git)
 ├── env.template.txt          ← Configuration template (fill in and rename to .env)

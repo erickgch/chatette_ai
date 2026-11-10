@@ -11,7 +11,7 @@
 param([switch]$Undo)
 
 $ErrorActionPreference = "Stop"
-$python   = "C:\users\erick\appdata\local\programs\python\python312\python.exe"
+$python   = Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe"
 $ruleName = "Chatette backend (home network + Tailscale)"
 
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(

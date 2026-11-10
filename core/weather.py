@@ -76,7 +76,7 @@ _WEATHER_FILLER = re.compile(
 def parse_weather_request(text: str) -> tuple[str, str]:
     """
     Split a free-form weather request into (city, timeframe), e.g.
-      "for the next 3 days in Cologne" → ("Cologne", "3 days")
+      "for the next 3 days in Hamburg" → ("Hamburg", "3 days")
       "Berlin tomorrow"                → ("Berlin", "tomorrow")
       "for the next 3 days"            → ("", "3 days")   (empty city = home)
     timeframe is one of: now, today, tomorrow, week, "<N> days".
