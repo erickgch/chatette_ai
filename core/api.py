@@ -373,8 +373,8 @@ def chat(request: QuestionRequest, http: Request, x_device: str = Header("app", 
     print(f"📱 Received from {_client_label(http, x_device)}: question='{request.question}' mode='{request.mode}'")
     if not request.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty")
-    if request.mode not in ["auto", "personal", "general"]:
-        raise HTTPException(status_code=400, detail="Mode must be 'auto', 'personal', or 'general'")
+    if request.mode not in ["auto", "personal", "general", "web_search"]:
+        raise HTTPException(status_code=400, detail="Mode must be 'auto', 'personal', 'general' or 'web_search'")
     try:
         answer = ask(request.question, mode=request.mode, lang=request.lang, device_id=x_device)
         print(f"✅ Answer: '{answer[:80]}...'")

@@ -416,6 +416,7 @@ VALID_INTENTS = [
     "view_emails",
     "get_weather",
     "find_places",
+    "web_search",
     "about_chatette",
     "control_bulbs",
     "set_alarm",
@@ -552,6 +553,7 @@ Valid intents:
 - view_emails: user wants to see recent emails (e.g. "any new emails?", "check my inbox", "what emails did I get?", "did I get any emails?")
 - get_weather: user wants weather info (e.g. "what's the weather?", "will it rain today?", "forecast for Berlin")
 - find_places: user wants to find nearby places, venues or businesses (e.g. "good Chinese restaurant nearby", "find me a pharmacy", "any sushi places close by?", "recommend a cafe near me")
+- web_search: the user EXPLICITLY asks to search the web or internet ("search the web for…", "google…", "look it up online", "such im Internet nach…", "busca en internet…"). Only when they explicitly ask for a web search — an ordinary question about news or facts is general.
 - about_chatette: user is asking about Chatette (e.g. "who are you?", "what can you do?")
 - control_bulbs: user wants to control a smart light bulb (e.g. "turn on the lights", "dim to 50%", "set color to blue", "red lights on", "turn off the lamp")
 - set_alarm: user wants to set a countdown timer ("set a timer for 10 minutes", "remind me in 30 seconds") OR an alarm at a specific time ("set an alarm for 7 AM", "wake me up at 6:30", "alarm at 20:00")
@@ -580,6 +582,7 @@ IMPORTANT: If the user mentions multiple items of the same type, extract ALL of 
 - get_weather: {{"city": "city name or empty for home", "timeframe": "now|today|tomorrow|week|N days (e.g. \"3 days\")"}}
 - find_places: {{"place_type": "restaurant|cafe|bar|pharmacy|supermarket|museum|gym|...", "cuisine": "chinese|italian|japanese|... or empty"}}
 - view_emails: {{"max_results": 5}} — optional, default 5
+- web_search: {{"query": "what to search for"}}
 - control_bulbs: {{}}
 - set_alarm: for a countdown use {{"seconds": <total seconds>}}; for a specific time use {{"hour": <0-23>, "minute": <0-59>}}
 - cast_youtube: {{"query": "search query string"}}
@@ -3052,6 +3055,13 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
         _remember(question, answer)
         return answer
 
+    # The app's Web search button: the message is a web search, no classification needed.
+    if mode == "web_search":
+        answer = handle_web_search(question, {}, lang)
+        print(f"Chatette: {answer}")
+        _remember(question, answer)
+        return answer
+
     # 1. Pending confirmation — check before classification
     if _pending().action is not None:
         if _pending().action in DRAFT_STAGES:
@@ -3127,6 +3137,8 @@ def _ask_internal(question: str, mode: str = "auto", lang: str = "en") -> str:
         answer = handle_view_agenda(question, lang)
     elif intent == "get_weather":
         answer = handle_weather(question, extracted, lang)
+    elif intent == "web_search" and _EXPLICIT_SEARCH_RE.search(question):
+        answer = handle_web_search(question, extracted, lang)
     elif intent == "find_places":
         answer = handle_places(question, extracted, lang)
     elif intent == "about_chatette":
@@ -3292,6 +3304,170 @@ def _ask_needs_agenda(question: str) -> bool:
     except Exception as e:
         print(f"⚠️ agenda call failed ({e}) — searching all sources")
         return True
+
+
+# ── Web search ──────────────────────────────────────────────────────────────────────
+# Only on explicit request ("search the web for…") or the app's Web search button. Two small
+# calls before searching: is the information time-sensitive (→ only the last 3 days), and a
+# short search-engine query. The query leaves the house (DuckDuckGo), so it may contain only
+# the public topic — never the user's name, people from their life or anything from their notes.
+
+_CURRENT_PROMPT = """Should a web search for this question be limited to the LAST 3 DAYS?
+
+Yes — only when the answer is about something that just happened or is changing day by day:
+news, recent events, results (elections, matches), today's prices, rates or scores, anything
+asked as "latest", "yesterday", "this week", "right now".
+No — everything else: history, definitions, how-tos, recipes, biographies, reviews and
+recommendations, facts about places, and future events whose dates are already known.
+
+Examples: "US election results yesterday" → yes. "current EUR to USD rate" → yes.
+"next solar eclipse in Europe" → no. "good Python courses" → no. "history of Cologne
+Cathedral" → no. "tamales recipe" → no.
+
+Question: "{q}"
+Reply with only: yes or no"""
+
+_SEARCH_QUERY_PROMPT = """{context}Turn this request into a short web search query (3-8 keywords) that a search engine
+answers well.
+
+Request: "{q}"
+
+Rules:
+- Leave out the instruction itself ("search the web for", "google", "look up", "online",
+  "im Internet", "such nach", "busca en internet").
+- Never add a date, month or year the user did not write. Leave out relative time words
+  (yesterday, today, latest, this week, gestern, ayer) — the search is already limited to
+  recent results when that matters.
+- Only the public topic: never include the user's name, names of people in their life
+  (partner, family, friends, colleagues), or anything personal from the conversation. Keep
+  public names — companies, places, public figures.
+- Use the language of the request, unless the topic is clearly international and English
+  finds it better.
+
+Examples:
+"search the web for the election results in the US yesterday" → US election results
+"busca en internet la receta de tamales" → receta tamales
+"Such im Internet nach den Öffnungszeiten vom Kölner Dom" → Kölner Dom Öffnungszeiten
+"google the latest iPhone price" → iPhone price
+"search the web for what my friend Tom's company Brightline does" → Brightline company
+
+Reply with only the query."""
+
+
+# Words that show the user explicitly wants a web search (en, de, es). Without one, a message the
+# classifier sent to web_search ("Who won the election yesterday?") stays an ordinary question.
+_EXPLICIT_SEARCH_RE = re.compile(
+    r"\b(web|internet|online|google\w*|search\w*|look (it |that |this )?up|"
+    r"netz|such\w*|recherch\w*|googel\w*|"
+    r"busca\w*|búsca\w*|búsqueda|en (la )?red)\b",
+    re.IGNORECASE)
+
+
+# Names that follow a relationship word ("my partner Anna", "mein Bruder Tom", "mi hermana Lena")
+# belong to the user's private life. They are removed from the search query in code — the model
+# alone sometimes keeps them.
+_RELATION_WORDS = (
+    r"partner|girlfriend|boyfriend|wife|husband|fianc[eé]e?|brother|sister|mother|mom|mum|father|dad|"
+    r"son|daughter|uncle|aunt|cousin|grandma|grandmother|grandpa|grandfather|friend|colleague|boss|"
+    r"neighbou?r|roommate|"
+    r"partnerin|freundin|freund|frau|mann|bruder|schwester|mutter|mama|vater|papa|sohn|tochter|onkel|"
+    r"tante|cousine?|oma|opa|kollegin|kollege|chef|chefin|nachbarin|nachbar|"
+    r"pareja|novia|novio|esposa|esposo|mujer|marido|hermana|hermano|madre|mam[aá]|padre|pap[aá]|hija|"
+    r"hijo|t[ií]a|t[ií]o|prima|primo|abuela|abuelo|amiga|amigo|colega|jefa|jefe|vecina|vecino"
+)
+_PRIVATE_NAME_RE = re.compile(
+    r"\b(?:my|our|mein\w*|unser\w*|mi|mis|nuestr\w*)\s+(?:" + _RELATION_WORDS + r")(?:'s)?,?\s+"
+    r"([A-ZÄÖÜÁÉÍÓÚÑ][\w\-]+)",
+    re.IGNORECASE)
+
+
+def _private_names(text: str) -> set[str]:
+    names = {m.group(1) for m in _PRIVATE_NAME_RE.finditer(text) if m.group(1)[0].isupper()}
+    if USER_NAME:
+        names.add(USER_NAME)
+    return names
+
+
+def _strip_private_names(query: str, question: str) -> str:
+    """Remove the user's name and names of people in their life from a search query."""
+    for name in _private_names(question):
+        query = re.sub(rf"\b{re.escape(name)}(?:'s|s)?\b", "", query, flags=re.IGNORECASE)
+    return " ".join(query.split())
+
+
+def _needs_current_info(question: str) -> bool:
+    try:
+        return llm_invoke(_CURRENT_PROMPT.format(q=question)).strip().lower().startswith("yes")
+    except RateLimitError:
+        raise
+    except Exception as e:
+        print(f"⚠️ 'current?' call failed ({e}) — searching without a time limit")
+        return False
+
+
+def _search_query(question: str) -> str:
+    prompt = _SEARCH_QUERY_PROMPT.format(context=_build_conversation_context(), q=question)
+    query = llm_invoke(prompt).strip().splitlines()[0].strip().strip('"').strip("'")
+    query = _strip_private_names(query, question)
+    return query or _strip_private_names(question, question)
+
+
+def handle_web_search(question: str, extracted: dict, lang: str = "en") -> str:
+    """Search the web (DuckDuckGo) and answer from the results, with short source links."""
+    from web_search import SearchUnavailable, search
+
+    current = _needs_current_info(question)
+    query = _search_query(question)
+    print(f"🌐 Web search: query='{query}' current={current}")
+    try:
+        results = search(query, current=current, lang=lang)
+    except SearchUnavailable as e:
+        print(f"⚠️ Web search unavailable: {e}")
+        return _t("I can't reach the web search right now — please try again in a few minutes.",
+                  "Ich komme gerade nicht an die Websuche — versuch es bitte in ein paar Minuten nochmal.",
+                  "Ahora mismo no puedo acceder a la búsqueda web — inténtalo de nuevo en unos minutos.", lang)
+    print(f"🌐 {len(results)} result(s): {[r.source for r in results]}")
+    if not results:
+        return _t(
+            "I couldn't find anything on the web for that. The search engine may also be limiting "
+            "requests right now — try again later or rephrase it.",
+            "Dazu habe ich im Web nichts gefunden. Die Suchmaschine bremst vielleicht auch gerade "
+            "Anfragen aus — versuch es später nochmal oder formuliere es anders.",
+            "No encontré nada en la web sobre eso. Puede que el buscador esté limitando las "
+            "peticiones ahora — inténtalo más tarde o reformúlalo.",
+            lang)
+
+    blocks = []
+    for i, r in enumerate(results, 1):
+        when = f" ({r.date.astimezone().strftime('%A %d %B, %H:%M')})" if r.date else ""
+        blocks.append(f"[{i}] {r.title} — {r.source}{when}\n{r.snippet}")
+    voice = _current_voice.get()
+    length = "1-2 short sentences" if voice else "2-4 sentences"
+    prompt = f"""{_persona_prompt(lang)}
+Today is {datetime.now().strftime("%A, %B %d, %Y, %H:%M")}.
+{_build_conversation_context()}The user asked: "{question}"
+
+Web search results:
+{chr(10).join(blocks)}
+
+Answer in {length}, using only these results. If they don't answer the question, say you
+couldn't find it. For news, say when it happened or how recent it is. Don't mention result
+numbers, sources or links — they are added separately.
+Always respond in {_LANG_NAMES.get(lang, "English")}.
+Chatette:"""
+    answer = llm_invoke(prompt).strip()
+    if voice:
+        return answer
+
+    links, seen = [], set()
+    for r in results:
+        if r.source not in seen and r.url:
+            seen.add(r.source)
+            links.append(f"[{r.source}]({r.url})")
+        if len(links) == 3:
+            break
+    label = _t("Sources", "Quellen", "Fuentes", lang)
+    return f"{answer}\n\n{label}: " + " · ".join(links)
 
 
 RAG_COLLECTIONS = ("calendar", "emails", "notes", "lists", "documents")
